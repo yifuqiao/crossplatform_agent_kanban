@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { oneLine } from "../adapters/common.js";
 import { normalizeStatus, TERMINAL } from "../status.js";
 
@@ -147,34 +146,9 @@ function handoffName(text, botId) {
   return m ? oneLine(m[1], 40) : "";
 }
 
-export const MAX_STATUS_CHECK = 10;
-
-// A relay task asking Grok Bot to report the real state of tasks it went quiet on. Grok Bot answers
-// on each original relay_task_id, so the relay record (not just the board) gets corrected.
-// Same tasks on the same day -> same client_request_id, so the relay dedupes repeat clicks.
-export function statusCheckRequest(tasks, now = new Date()) {
-  const ids = tasks.map((t) => t.relayTaskId).sort();
-  const digest = createHash("sha256").update(ids.join(",")).digest("hex").slice(0, 12);
-  const day = now.toISOString().slice(0, 10).replace(/-/g, "");
-  const list = tasks.map((t) => `- ${t.relayTaskId} ${oneLine(t.title, 60)}`).join("\n");
-  return {
-    schema_version: "1",
-    title: tasks.length === 1 ? `状态核对：${oneLine(tasks[0].title, 80)}` : `状态核对：${tasks.length} 个长时间无进展的任务`,
-    objective:
-      "以下 relay 任务在看板上长时间没有新进展。请逐个核对真实状态，并用执行端接口回报到各自原来的 relay_task_id：" +
-      "已完成→finished；已放弃、失败或已被取代→failed（summary 写明原因）；仍在进行→progress（executing 或 waiting_approval，写明当前进度）。\n" + list,
-    completion_criteria: ["每个列出的 relay_task_id 都有一条新的进度或终态报告", "没有重新执行任何原任务"],
-    constraints: "只核对并回报状态；不要重新执行、部署、合并或修改任何服务。",
-    source: "agent-kanban",
-    client_request_id: `status-check-${day}-${digest}`,
-    dry_run: false,
-  };
-}
-
 export function createGrokRelayPoller({ store, baseUrl, keys, limit = 50, closeCursorChildren = true, fetchImpl = fetch, log = console }) {
   const origin = baseUrl.replace(/\/+$/, "");
   const lastSeen = new Map();
-  const owners = new Map(); // relayTaskId -> caller key that can see it
 
   async function getJson(path, key) {
     const res = await fetchImpl(`${origin}${path}`, { headers: { authorization: `Bearer ${key}`, accept: "application/json" }, signal: AbortSignal.timeout(15000) });
@@ -187,7 +161,6 @@ export function createGrokRelayPoller({ store, baseUrl, keys, limit = 50, closeC
       const list = await getJson(`/tasks?limit=${limit}`, key);
       const tasks = list.tasks || [];
       for (const listed of tasks) {
-        if (!owners.has(listed.relayTaskId)) owners.set(listed.relayTaskId, key);
         const stamp = `${listed.status}|${listed.updatedAt}`;
         if (lastSeen.get(listed.relayTaskId) === stamp) continue;
         const detail = await getJson(`/tasks/${listed.relayTaskId}`, key);
@@ -198,31 +171,5 @@ export function createGrokRelayPoller({ store, baseUrl, keys, limit = 50, closeC
     }
   }
 
-  // keys: board keys "grok-bot:<relayTaskId>". Returns the new relay task id.
-  async function askStatus(taskKeys) {
-    const tasks = taskKeys.map((k) => ({ relayTaskId: k.slice(SOURCE.length + 1), title: store.get(k)?.title || k }));
-    const key = owners.get(tasks[0].relayTaskId) || keys[0];
-    const res = await fetchImpl(`${origin}/submit-task`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${key}`, "content-type": "application/json", accept: "application/json" },
-      body: JSON.stringify(statusCheckRequest(tasks)),
-      signal: AbortSignal.timeout(20000),
-    });
-    const body = await res.json().catch(() => ({}));
-    const relayTaskId = body.relayTaskId || body.receipt?.relayTaskId;
-    if (!res.ok || !relayTaskId) throw new Error(`relay submit-task -> HTTP ${res.status}${body.error ? `: ${body.error}` : ""}`);
-    owners.set(relayTaskId, key);
-    const checkKey = `${SOURCE}:${relayTaskId}`;
-    store.apply({
-      key: checkKey, kind: "bot", title: statusCheckRequest(tasks).title, title_mode: "default",
-      parent: taskKeys.length === 1 ? taskKeys[0] : undefined, initial_status: "queued",
-      message: "Status check sent to Grok Bot", type: "status_check",
-    });
-    for (const k of taskKeys) {
-      store.apply({ key: k, meta: { status_check: checkKey }, message: `Asked Grok Bot for the real status (${relayTaskId.slice(0, 8)})`, event_id: `status-check:${relayTaskId}`, type: "status_check" });
-    }
-    return { relayTaskId, key: checkKey, deduplicated: Boolean(body.deduplicated) };
-  }
-
-  return { name: "grok-relay", poll, askStatus, log };
+  return { name: "grok-relay", poll, log };
 }

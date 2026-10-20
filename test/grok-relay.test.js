@@ -120,34 +120,3 @@ test("a task titled 取代 <id> marks the older relay task superseded", async ()
   assert.equal(ev.meta.superseded_by, "grok-bot:ad60c649-c58e-4cc5-9ca7-e9061d76e4a1");
   assert.equal(supersededEvents(tasks.slice(1)).length, 0);
 });
-
-test("status-check request is deduped per day and fits the relay webhook limit", async () => {
-  const { statusCheckRequest } = await import("../src/pollers/grok-relay.js");
-  const tasks = Array.from({ length: 10 }, (_, i) => ({ relayTaskId: `${String(i).padStart(8, "0")}-0000-4000-8000-000000000000`, title: "部署日川数字工厂手机版 UI（PR #85）".repeat(3) }));
-  const a = statusCheckRequest(tasks, new Date("2026-10-20T10:00:00Z"));
-  const b = statusCheckRequest([...tasks].reverse(), new Date("2026-10-20T23:00:00Z"));
-  const c = statusCheckRequest(tasks, new Date("2026-10-21T01:00:00Z"));
-  assert.equal(a.client_request_id, b.client_request_id);
-  assert.notEqual(a.client_request_id, c.client_request_id);
-  assert.ok(Buffer.byteLength(JSON.stringify(a)) < 3000);
-  assert.match(a.objective, /00000003-0000-4000-8000-000000000000/);
-});
-
-test("askStatus submits to the relay and nests the check under the task", async () => {
-  const s = new Store();
-  const calls = [];
-  const fetchImpl = async (url, opts) => {
-    calls.push({ url, opts });
-    if (url.endsWith("/submit-task")) return { ok: true, status: 200, json: async () => ({ relayTaskId: "aaaaaaaa-1111-4222-8333-444444444444", status: "submitted" }) };
-    return { ok: true, status: 200, json: async () => (url.includes("/tasks?") ? { tasks: [listed] } : detail) };
-  };
-  const poller = createGrokRelayPoller({ store: s, baseUrl: "https://relay.example.com", keys: ["k1", "k2"], fetchImpl });
-  await poller.poll();
-  const out = await poller.askStatus([`grok-bot:${ID}`]);
-  const submit = calls.find((c) => c.url.endsWith("/submit-task"));
-  assert.equal(submit.opts.headers.authorization, "Bearer k1");
-  assert.equal(JSON.parse(submit.opts.body).source, "agent-kanban");
-  assert.equal(out.key, "grok-bot:aaaaaaaa-1111-4222-8333-444444444444");
-  assert.equal(s.get(out.key).parentKey, `grok-bot:${ID}`);
-  assert.equal(s.get(`grok-bot:${ID}`).meta.status_check, out.key);
-});

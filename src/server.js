@@ -7,9 +7,7 @@ import { Store, publicTask } from "./store.js";
 import { COLUMNS } from "./status.js";
 import { handleMcp } from "./mcp.js";
 import { cursorAgentEvent, verifyCursorWebhook, createCursorCloudPoller } from "./pollers/cursor-cloud.js";
-import { createGrokRelayPoller, MAX_STATUS_CHECK } from "./pollers/grok-relay.js";
-
-const GROK_TASK_KEY = /^grok-bot:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+import { createGrokRelayPoller } from "./pollers/grok-relay.js";
 import {
   createWecomClient,
   isWecomWired,
@@ -151,7 +149,6 @@ export function createServer({
   env = process.env,
   fetchImpl = globalThis.fetch,
   dataDir = dataDirFromStore(store) || env.AKB_DATA_DIR || null,
-  grok = null, // grok relay poller, for asking Grok Bot about tasks it went quiet on
 } = {}) {
   const base = (basePath || "").replace(/\/+$/, "");
   const clients = new Set();
@@ -438,19 +435,6 @@ export function createServer({
         }
         if (req.method === "DELETE") return store.remove(key) ? send(res, 200, { ok: true }) : send(res, 404, { error: "not found" });
         return send(res, 405, { error: "method not allowed" });
-      }
-
-      if (url.pathname === "/api/grok/status-check" && req.method === "POST") {
-        if (!grok) return send(res, 503, { error: "Grok relay is not configured on this board (GROK_RELAY_URL / GROK_RELAY_KEYS)" });
-        const body = parseJson(await readBody(req));
-        const keys = [...new Set(Array.isArray(body?.keys) ? body.keys : [])];
-        const valid = keys.length > 0 && keys.length <= MAX_STATUS_CHECK && keys.every((k) => GROK_TASK_KEY.test(k) && store.get(k));
-        if (!valid) return send(res, 400, { error: `keys must be 1-${MAX_STATUS_CHECK} grok-bot:<relayTaskId> cards on this board` });
-        try {
-          return send(res, 200, await grok.askStatus(keys));
-        } catch (err) {
-          return send(res, 502, { error: err.message });
-        }
       }
 
       if (url.pathname === "/api/events" && req.method === "POST") {
