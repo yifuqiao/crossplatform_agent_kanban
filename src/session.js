@@ -55,9 +55,14 @@ export function verifySession(secret, token) {
   return payload;
 }
 
-export function issueState(secret) {
+export function issueState(secret, next) {
   const state = randomBytes(16).toString("hex");
-  const cookie = signPayload(secret, { s: state, exp: Date.now() + STATE_TTL_MS });
+  const payload = { s: state, exp: Date.now() + STATE_TTL_MS };
+  // Optional return path for the WeCom callback. Stored inside the signed cookie so the
+  // authorize URL (which may contain https:// in redirect_uri) never has to ride on the
+  // WeCom redirect, and so safeNextPath can still reject anything that is not a board path.
+  if (typeof next === "string" && next.startsWith("/") && next.length <= 512 && !next.includes("\\")) payload.n = next;
+  const cookie = signPayload(secret, payload);
   return { state, cookie };
 }
 

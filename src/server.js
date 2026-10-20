@@ -16,6 +16,7 @@ import {
   wecomSecretPath,
   writeWecomSecret,
 } from "./wecom.js";
+import { createOauth } from "./oauth.js";
 import {
   SESSION_COOKIE,
   STATE_COOKIE,
@@ -26,6 +27,7 @@ import {
   issueSession,
   issueState,
   parseCookies,
+  verifyPayload,
   verifySession,
   verifyState,
 } from "./session.js";
@@ -151,10 +153,21 @@ export function createServer({
   env = process.env,
   fetchImpl = globalThis.fetch,
   dataDir = dataDirFromStore(store) || env.AKB_DATA_DIR || null,
+  oauthNow,
 } = {}) {
   const base = (basePath || "").replace(/\/+$/, "");
   // Per-source keys: hashes only, MCP only. Bad config fails at startup rather than silently.
   const sourceEntries = parseSourceTokens(sourceTokens);
+  // OAuth for clients that cannot send a static Bearer (claude.ai / Claude iOS). Fail closed:
+  // a missing public URL or unreadable oauth state disables these routes (503) and leaves
+  // static Bearer keys on the path below unchanged.
+  const oauth = createOauth({
+    dataDir,
+    publicUrl: env.AKB_PUBLIC_URL,
+    sourceEntries,
+    env,
+    now: oauthNow,
+  });
   const clients = new Set();
   const broadcast = (event, data) => {
     const frame = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
@@ -235,12 +248,24 @@ export function createServer({
         return send(res, 200, { ok: true, tasks: store.tasks.size });
       }
 
+      if (await oauth.handle(req, res, url, {
+        base,
+        send,
+        sendHtml,
+        readBody,
+        session: () => sessionOk(req),
+        wecomWired: wired(),
+      })) return;
+
       // --- WeCom OAuth (no board auth required) ---
       if (url.pathname === "/auth/wecom/start" && req.method === "GET") {
         const cfg = currentConfig();
         const client = getWecom();
         if (!client || !cfg.sessionSecret) return send(res, 503, { error: "wecom not configured" });
-        const { state, cookie } = issueState(cfg.sessionSecret);
+        const rawNext = url.searchParams.get("next");
+        const safe = rawNext ? safeNextPath(rawNext, base) : "";
+        const keep = rawNext && safe === rawNext ? rawNext : "";
+        const { state, cookie } = issueState(cfg.sessionSecret, keep || undefined);
         const location = client.authorizeUrl(state);
         res.writeHead(302, {
           location,
@@ -260,7 +285,10 @@ export function createServer({
         if (!state || !verifyState(cfg.sessionSecret, cookies[STATE_COOKIE], state)) {
           return sendHtml(res, 400, "<!doctype html><title>Bad state</title><p>Invalid or expired OAuth state.</p>");
         }
-        const next = safeNextPath(url.searchParams.get("next"), base);
+        const statePayload = verifyPayload(cfg.sessionSecret, cookies[STATE_COOKIE]);
+        const next = url.searchParams.has("next")
+          ? safeNextPath(url.searchParams.get("next"), base)
+          : safeNextPath(statePayload?.n, base);
         let userid;
         try {
           userid = await client.getuserinfo(code);
@@ -280,7 +308,8 @@ export function createServer({
         }
         const session = issueSession(cfg.sessionSecret, userid);
         // Default home is {base}/; `next` is honored only when it stays under the base prefix.
-        const location = url.searchParams.has("next") ? next : (base ? `${base}/` : "/");
+        // `next` comes from the query string or, when WeCom dropped it, from the signed state cookie.
+        const location = url.searchParams.has("next") || statePayload?.n ? next : (base ? `${base}/` : "/");
         res.writeHead(302, {
           location,
           "set-cookie": [
@@ -400,13 +429,20 @@ export function createServer({
       }
 
       // MCP also accepts per-source keys (Authorization header only); they report as their bound source.
+      // Static AKB_TOKEN / session / AKB_SOURCE_TOKENS are checked first and keep their old principal.
+      // An OAuth access token is a third Bearer, equivalent to the source key it was consented as.
       if (url.pathname === "/mcp") {
         let principal = authOk(req, url) ? undefined : null;
         if (principal === null) {
           const header = req.headers.authorization || "";
-          const entry = header.startsWith("Bearer ") ? matchSourceToken(header.slice(7), sourceEntries) : null;
-          if (!entry) return send(res, 401, { error: "unauthorized" });
-          principal = { source: entry.source, agentName: entry.agentName };
+          const given = header.startsWith("Bearer ") ? header.slice(7) : "";
+          const entry = given ? matchSourceToken(given, sourceEntries) : null;
+          if (entry) principal = { source: entry.source, agentName: entry.agentName };
+          else {
+            const viaOauth = given ? oauth.principalForBearer(given) : null;
+            if (viaOauth) principal = viaOauth;
+            else return send(res, 401, { error: "unauthorized" }, oauth.unauthorizedHeaders());
+          }
         }
         if (req.method !== "GET" && !originOk(req)) return send(res, 403, { error: "cross-origin write refused" });
         if (req.method !== "POST") return send(res, 405, { error: "POST JSON-RPC messages to /mcp" }, { allow: "POST" });
