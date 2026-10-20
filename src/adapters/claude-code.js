@@ -1,4 +1,4 @@
-import { folder, oneLine } from "./common.js";
+import { folder, oneLine, promptText } from "./common.js";
 
 const SOURCE = "claude-code";
 const SUBAGENT_TOOLS = new Set(["Task", "Agent"]);
@@ -27,11 +27,15 @@ export function claudeCodeEvents(payload, env = process.env) {
 
   switch (name) {
     case "SessionStart":
-      events.push({ ...base, status: "review", title: `Claude Code${remote ? " (web)" : ""} · ${folder(payload.cwd)}`, title_mode: "default", message: `Session ${payload.source || "started"}`, type: "session" });
+      // A fresh session has no work yet: it starts in Queued. initial_status leaves an existing card
+      // alone (resume / compact / clear fire SessionStart mid-task too).
+      events.push({ ...base, initial_status: "queued", title: `Claude Code${remote ? " (web)" : ""} · ${folder(payload.cwd)}`, title_mode: "default", message: `Session ${payload.source || "started"}`, type: "session" });
       break;
-    case "UserPromptSubmit":
-      events.push({ ...base, status: "running", title: oneLine(payload.prompt, 100) || undefined, title_mode: "first", message: `Prompt: ${oneLine(payload.prompt, 400)}`, type: "prompt" });
+    case "UserPromptSubmit": {
+      const prompt = promptText(payload.prompt);
+      events.push({ ...base, status: "running", title: oneLine(prompt, 100) || undefined, title_mode: "first", message: `Prompt: ${oneLine(prompt, 400)}`, type: "prompt" });
       break;
+    }
     case "PreToolUse":
       if (SUBAGENT_TOOLS.has(payload.tool_name)) {
         const input = payload.tool_input || {};
@@ -62,13 +66,19 @@ export function claudeCodeEvents(payload, env = process.env) {
           message: "Subagent finished",
           type: "subagent",
         });
+      } else if (/(^|__)set_thread_resolved$/.test(payload.tool_name || "") && typeof payload.tool_input?.resolved === "boolean") {
+        // Resolving a Claude project thread is the only "I'm finished" signal a cloud session gives;
+        // the session itself never ends, so without this the card sits in 审核中 forever.
+        // PostToolUse, not PreToolUse: it only fires once the call succeeded.
+        const resolved = payload.tool_input.resolved;
+        events.push({ ...base, status: resolved ? "done" : "running", message: resolved ? "Thread resolved" : "Thread reopened", type: "resolve" });
       }
       break;
     case "Notification":
       events.push({ ...base, status: "waiting", message: payload.message || "Claude Code needs your attention", type: "notification" });
       break;
     case "Stop":
-      events.push({ ...base, status: "review", message: "Turn finished, waiting for your next prompt", type: "stop" });
+      events.push({ ...base, status: "review", keep_terminal: true, message: "Turn finished, waiting for your next prompt", type: "stop" });
       break;
     case "SessionEnd":
       events.push({ ...base, status: "done", message: `Session ended${payload.reason ? ` (${payload.reason})` : ""}`, type: "session" });

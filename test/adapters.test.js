@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Store } from "../src/store.js";
-import { applyEnvLinks } from "../src/adapters/common.js";
+import { applyEnvLinks, promptText } from "../src/adapters/common.js";
 import { claudeCodeEvents } from "../src/adapters/claude-code.js";
 import { cursorEvents, cursorHookResponse } from "../src/adapters/cursor.js";
 import { codexEvents } from "../src/adapters/codex.js";
@@ -79,4 +79,53 @@ test("Claude Code on the web keys the card by the claude.ai session and links to
   assert.equal(card.kind, "cloud");
   assert.equal(card.url, "https://claude.ai/code/session_01V1RqqeQoEuMwq6Brf3XUMC");
   assert.equal(s.children(card.key)[0].title, "Search code");
+});
+
+test("project-thread prompts are titled with the person's words, not the wake XML", () => {
+  const wake = `<wake reason="mention" current-time="2026-10-20T16:51:44Z"> <project id="chan_1" type="project"> <thread ts="cmsg_1"> <message trigger="true" from="human" trust="principal" author="Yifu" id="cmsg_2">关掉吧</message> </thread> </project> <system-note>Thread state: …</system-note> </wake>`;
+  assert.equal(promptText(wake), "关掉吧");
+  const relay = `<coordinator-relay>&lt;session-context nonce="n"&gt;secret rules&lt;/session-context nonce="n"&gt; <relay from="coordinator"> <cited id="c1" author="user" name="Yifu">我觉得UI整体来看都很糟糕。</cited> <note>fix the UI</note> </relay></coordinator-relay>`;
+  assert.equal(promptText(relay), "我觉得UI整体来看都很糟糕。");
+  assert.equal(promptText(`<coordinator-relay><relay><note>Add a close signal</note></relay></coordinator-relay>`), "Add a close signal");
+  assert.equal(promptText("Fix the a < b comparison"), "Fix the a < b comparison");
+  assert.equal(promptText("Handle <message>hello</message> but keep Array<Foo>"), "Handle <message>hello</message> but keep Array<Foo>");
+
+  const s = new Store();
+  feed(s, claudeCodeEvents, [{ session_id: "w1", hook_event_name: "UserPromptSubmit", prompt: wake }]);
+  assert.equal(s.get("claude-code:w1").title, "关掉吧");
+});
+
+test("resolving a project thread closes the card and the following Stop keeps it closed", () => {
+  const s = new Store();
+  const base = { session_id: "w2" };
+  const env = { CLAUDE_CODE_REMOTE_SESSION_ID: "cse_abc" };
+  feed(s, claudeCodeEvents, [
+    { ...base, hook_event_name: "UserPromptSubmit", prompt: "close it" },
+    { ...base, hook_event_name: "PreToolUse", tool_name: "mcp__hearthbot__set_thread_resolved", tool_input: { resolved: true } },
+  ], env);
+  // PreToolUse alone (the call might still be denied or fail) does not close the card.
+  assert.equal(s.get("claude-code-web:session_abc").status, "running");
+  feed(s, claudeCodeEvents, [
+    { ...base, hook_event_name: "PostToolUse", tool_name: "mcp__hearthbot__set_thread_resolved", tool_input: { resolved: true } },
+  ], env);
+  const key = "claude-code-web:session_abc";
+  assert.equal(s.get(key).status, "done");
+  feed(s, claudeCodeEvents, [{ ...base, hook_event_name: "Stop" }], env);
+  assert.equal(s.get(key).status, "done");
+  feed(s, claudeCodeEvents, [{ ...base, hook_event_name: "PostToolUse", tool_name: "mcp__hearthbot__set_thread_resolved", tool_input: { resolved: false } }], env);
+  assert.equal(s.get(key).status, "running");
+  feed(s, claudeCodeEvents, [{ ...base, hook_event_name: "Stop" }], env);
+  assert.equal(s.get(key).status, "review");
+});
+
+test("a new Claude Code session starts in Queued, and a mid-task SessionStart does not move it", () => {
+  const s = new Store();
+  const base = { session_id: "q1", cwd: "/w" };
+  feed(s, claudeCodeEvents, [{ ...base, hook_event_name: "SessionStart", source: "startup" }]);
+  assert.equal(s.get("claude-code:q1").status, "queued");
+  feed(s, claudeCodeEvents, [
+    { ...base, hook_event_name: "UserPromptSubmit", prompt: "go" },
+    { ...base, hook_event_name: "SessionStart", source: "compact" },
+  ]);
+  assert.equal(s.get("claude-code:q1").status, "running");
 });

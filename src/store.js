@@ -277,7 +277,8 @@ export class Store extends EventEmitter {
 
     const pendingRequest = Boolean(task.updateRequest);
     // Ignore a status older than the one already shown (events can arrive out of order).
-    const stale = Boolean(task.statusAt && now < task.statusAt);
+    // keep_terminal: a routine status (e.g. "turn finished") that must not reopen a done/failed card.
+    const stale = Boolean(task.statusAt && now < task.statusAt) || Boolean(input.keep_terminal && TERMINAL.has(task.status));
     const statusChanged = Boolean(status && status !== task.status && !stale);
     if (status && !stale) task.statusAt = now;
     if (statusChanged) {

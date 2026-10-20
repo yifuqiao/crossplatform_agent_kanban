@@ -1,4 +1,4 @@
-import { folder, oneLine } from "./common.js";
+import { folder, oneLine, promptText } from "./common.js";
 
 // Maps one Cursor hook payload (IDE agent and cursor-agent CLI share .cursor/hooks.json).
 // Register with: akb hook cursor  (see examples/cursor-hooks.json)
@@ -14,7 +14,7 @@ export function cursorEvents(payload) {
 
   switch (name) {
     case "beforeSubmitPrompt":
-      events.push({ ...base, status: "running", title: oneLine(payload.prompt, 100) || `Cursor · ${folder(cwd)}`, title_mode: "first", message: `Prompt: ${oneLine(payload.prompt, 400)}`, type: "prompt" });
+      events.push({ ...base, status: "running", title: oneLine(promptText(payload.prompt), 100) || `Cursor · ${folder(cwd)}`, title_mode: "first", message: `Prompt: ${oneLine(promptText(payload.prompt), 400)}`, type: "prompt" });
       break;
     case "afterShellExecution":
       events.push({ ...base, status: "running", message: `Shell · ${oneLine(payload.command, 160)}`, type: "tool" });
