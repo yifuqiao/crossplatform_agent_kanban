@@ -66,12 +66,26 @@ function cleanOptions(options) {
     .slice(0, 12);
 }
 
-const CHOICE_SOURCES = new Set(["board", "chat"]);
+function optionsEqual(a, b) {
+  if (!a && !b) return true;
+  if (!a || !b || a.length !== b.length) return false;
+  return a.every((o, i) => o.label === b[i].label && o.value === b[i].value);
+}
 
-function cleanChoiceSource(source, fallback = "board") {
-  const s = cleanString(source, 40);
-  if (s && CHOICE_SOURCES.has(s)) return s;
-  return fallback;
+// Same validation for board clicks and chat choice_resolved (except source, which callers force).
+function validateChoice(task, value) {
+  if (!task || task.placeholder) return { error: "not found", status: 404 };
+  if (task.status !== "waiting") return { error: `task is ${task.status}`, status: 409 };
+  if (!task.options?.length) return { error: "no options on this card", status: 409 };
+  if (typeof value !== "string") return { error: "value must be a string", status: 400 };
+  const cleaned = cleanString(value, 200);
+  if (!cleaned) return { error: "value required", status: 400 };
+  if (!task.options.some((o) => o.value === cleaned)) return { error: "value not in options", status: 400 };
+  if (task.choice) {
+    if (task.choice.value === cleaned) return { ok: true, cleaned, idempotent: true };
+    return { error: "already chosen", status: 409 };
+  }
+  return { ok: true, cleaned, idempotent: false };
 }
 
 export class Store extends EventEmitter {
@@ -209,34 +223,48 @@ export class Store extends EventEmitter {
     }
 
     // Optional needs-you prompt fields (all omitable; old cards stay unchanged).
+    // A new question/options round clears the live choice (prior pick stays on the timeline).
     const options = cleanOptions(input.options);
-    if (options) task.options = options;
     const question = cleanString(input.question, 500);
-    if (question) task.question = question;
+    let newRound = false;
+    if (options && !optionsEqual(task.options, options)) {
+      task.options = options;
+      newRound = true;
+    }
+    if (question && question !== task.question) {
+      task.question = question;
+      newRound = true;
+    }
     const background = cleanString(input.background, 4000);
     if (background) task.background = background;
+    if (newRound && task.choice) {
+      task.events.push({
+        id: randomUUID(),
+        at: now,
+        status: null,
+        message: `Cleared previous choice “${task.choice.value}” for a new question`,
+        type: "choice_clear",
+      });
+      if (task.events.length > MAX_EVENTS) task.events.splice(0, task.events.length - MAX_EVENTS);
+      task.choice = null;
+    }
 
-    // Chat-side resolution: same first-wins rule as a board click.
-    if (input.choice_resolved && typeof input.choice_resolved === "object" && !task.choice) {
-      const value = cleanString(input.choice_resolved.value, 200);
-      if (value) {
-        const allowed = task.options?.length ? task.options.some((o) => o.value === value) : true;
-        if (allowed) {
-          task.choice = {
-            value,
-            at: now,
-            source: cleanChoiceSource(input.choice_resolved.source, "chat"),
-          };
-          task.events.push({
-            id: randomUUID(),
-            at: now,
-            status: null,
-            message: `Chose “${value}” (${task.choice.source})`,
-            type: "choice",
-          });
-          if (task.events.length > MAX_EVENTS) task.events.splice(0, task.events.length - MAX_EVENTS);
-        }
+    // Chat / /api/events resolution only. Source is always "chat" — never trust client source:"board".
+    if (input.choice_resolved && typeof input.choice_resolved === "object") {
+      const check = validateChoice(task, input.choice_resolved.value);
+      if (check.ok && !check.idempotent) {
+        const by = cleanString(input.choice_by, 80) || null;
+        task.choice = { value: check.cleaned, at: now, source: "chat", by };
+        task.events.push({
+          id: randomUUID(),
+          at: now,
+          status: null,
+          message: `Chose “${check.cleaned}” (chat${by ? ` · ${by}` : ""})`,
+          type: "choice",
+        });
+        if (task.events.length > MAX_EVENTS) task.events.splice(0, task.events.length - MAX_EVENTS);
       }
+      // Invalid / conflict / idempotent: leave card as-is (MCP surfaces current choice).
     }
 
     const parent = parseRef(input.parent);
@@ -305,27 +333,23 @@ export class Store extends EventEmitter {
     return task;
   }
 
-  // Board click on a needs-you option. First choice wins (chat or board); repeats are no-ops.
+  // Board click only — always records source "board". Chat must use choice_resolved via apply.
   // Nothing is sent to the agent or the relay — bots poll via kanban_get_choice.
-  recordChoice(key, { value, source = "board", by } = {}) {
+  recordChoice(key, { value, by } = {}) {
     const task = this.tasks.get(key);
-    if (!task || task.placeholder) return null;
-    if (task.choice) return { task, changed: false };
-    const cleaned = cleanString(value, 200);
-    if (!cleaned) return null;
-    if (task.options?.length && !task.options.some((o) => o.value === cleaned)) return null;
+    if (!task) return { error: "not found", status: 404 };
+    if (task.placeholder) return { error: "this card only groups other tasks; choose on one of them", status: 409 };
+    const check = validateChoice(task, value);
+    if (!check.ok) return { error: check.error, status: check.status };
+    if (check.idempotent) return { task, changed: false };
     const at = new Date().toISOString();
-    task.choice = {
-      value: cleaned,
-      at,
-      source: cleanChoiceSource(source, "board"),
-      by: cleanString(by, 80) || null,
-    };
+    const who = cleanString(by, 80) || null;
+    task.choice = { value: check.cleaned, at, source: "board", by: who };
     task.events.push({
       id: randomUUID(),
       at,
       status: null,
-      message: `Chose “${cleaned}” (${task.choice.source})`,
+      message: `Chose “${check.cleaned}” (board${who ? ` · ${who}` : ""})`,
       type: "choice",
     });
     if (task.events.length > MAX_EVENTS) task.events.splice(0, task.events.length - MAX_EVENTS);

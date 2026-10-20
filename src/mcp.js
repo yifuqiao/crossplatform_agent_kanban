@@ -41,10 +41,11 @@ const TOOLS = [
           type: "object",
           additionalProperties: false,
           required: ["value"],
-          description: "Mark the card as already chosen in chat (source chat). First choice wins; does not overwrite a board click.",
+          description:
+            "Mark the card as already chosen in chat. Always stored as source \"chat\" (any client-supplied source is ignored — only the board click API may write source \"board\"). First choice wins for the current question/options round.",
           properties: {
             value: { type: "string", maxLength: 200 },
-            source: { type: "string", enum: ["chat", "board"], description: "Where the choice was made. Default chat." },
+            source: { type: "string", description: "Ignored; stored source is always chat." },
           },
         },
       },
@@ -110,6 +111,12 @@ function ownerOf(principal) {
   return principal.agentName ? `mcp:${principal.source}@${principal.agentName}` : `mcp:${principal.source}`;
 }
 
+// Who recorded a chat-side choice (never "board").
+function choiceByOf(principal) {
+  if (principal.admin) return "admin-token";
+  return principal.agentName ? `${principal.source}@${principal.agentName}` : principal.source;
+}
+
 function brief(t, store, principal) {
   const children = store.children(t.key).filter((c) => canSee(principal, c)).length;
   return {
@@ -168,11 +175,15 @@ function callTool(store, name, args = {}, principal = ADMIN) {
       if (!args.title) throw new ToolError("title is required when creating a card.");
       key = `${as.source}:${randomUUID()}`;
     }
+    const choiceResolved = args.choice_resolved && typeof args.choice_resolved === "object"
+      ? { value: args.choice_resolved.value } // drop any client "source"; store forces chat
+      : undefined;
     const { task } = store.apply({
       key, title: args.title, status: args.status, message: args.note, summary: args.summary,
       parent: args.parent_key, links: args.links, kind: existing || !principal.admin ? undefined : "chat", agent_name: as.agentName,
       created_by: existing ? undefined : ownerOf(principal), brief: Boolean(args.summary), type: args.summary ? "brief" : undefined,
-      question: args.question, background: args.background, options: args.options, choice_resolved: args.choice_resolved,
+      question: args.question, background: args.background, options: args.options,
+      choice_resolved: choiceResolved, choice_by: choiceResolved ? choiceByOf(principal) : undefined,
     });
     return {
       task_key: task.key, status: task.status, title: task.title, source: task.source, agent_name: task.agentName || null,
@@ -204,7 +215,7 @@ function callTool(store, name, args = {}, principal = ADMIN) {
       background: task.background || null,
       options: task.options || null,
       choice: task.choice
-        ? { value: task.choice.value, at: task.choice.at, source: task.choice.source }
+        ? { value: task.choice.value, at: task.choice.at, source: task.choice.source, by: task.choice.by || null }
         : null,
     };
   }

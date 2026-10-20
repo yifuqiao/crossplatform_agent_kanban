@@ -117,7 +117,7 @@ test("kanban_report stores optional question, background, options; omitted field
   });
 });
 
-test("board choice requires auth, first wins, repeat does not overwrite", async () => {
+test("board choice requires auth; same value is idempotent 200; different value is 409", async () => {
   await withServer({}, async ({ base, store, rpc }) => {
     const { result } = await rpc("kanban_report", {
       title: "审批",
@@ -136,21 +136,20 @@ test("board choice requires auth, first wins, repeat does not overwrite", async 
     const body = await first.json();
     assert.equal(body.choice.value, "a");
     assert.equal(body.choice.source, "board");
+    assert.equal(body.choice.by, "admin-token");
     assert.equal(body.changed, true);
 
-    const again = await choose("b");
-    assert.equal(again.status, 200);
-    const againBody = await again.json();
-    assert.equal(againBody.choice.value, "a");
-    assert.equal(againBody.changed, false);
-    assert.equal(store.get(key).choice.value, "a");
+    const same = await choose("a");
+    assert.equal(same.status, 200);
+    assert.equal((await same.json()).changed, false);
 
-    assert.equal((await choose("not-an-option")).status, 200); // still first-wins no-op
+    const again = await choose("b");
+    assert.equal(again.status, 409);
     assert.equal(store.get(key).choice.value, "a");
   });
 });
 
-test("choice_resolved from chat marks 已选; board click afterward does not overwrite", async () => {
+test("choice_resolved from chat marks 已选; board click with other value is 409", async () => {
   await withServer({}, async ({ base, store, rpc }) => {
     const created = await rpc("kanban_report", {
       title: "聊天里先选",
@@ -167,6 +166,7 @@ test("choice_resolved from chat marks 已选; board click afterward does not ove
     assert.equal(resolved.result.isError, false);
     assert.equal(resolved.result.structuredContent.choice.value, "yes");
     assert.equal(resolved.result.structuredContent.choice.source, "chat");
+    assert.equal(resolved.result.structuredContent.choice.by, "admin-token");
     assert.equal(store.get(key).choice.source, "chat");
 
     const overwrite = await rpc("kanban_report", {
@@ -177,8 +177,8 @@ test("choice_resolved from chat marks 已选; board click afterward does not ove
     assert.equal(overwrite.result.structuredContent.choice.value, "yes");
 
     const click = await fetch(`${base}/api/tasks/${encodeURIComponent(key)}/choice`, json({ value: "no" }, bearer()));
-    assert.equal(click.status, 200);
-    assert.equal((await click.json()).choice.value, "yes");
+    assert.equal(click.status, 409);
+    assert.equal(store.get(key).choice.value, "yes");
   });
 });
 
@@ -254,18 +254,122 @@ test("POST /choice sends no outbound network (not to relay or anywhere else)", a
   });
 });
 
-test("store.recordChoice first-wins and rejects unknown option values", () => {
+test("store.recordChoice validates waiting/options/value and is idempotent", () => {
   const s = new Store();
-  s.apply({
-    key: "a:1",
-    status: "waiting",
-    options: [{ label: "Yes", value: "yes" }],
-  });
-  assert.equal(s.recordChoice("a:1", { value: "no" }), null);
-  const first = s.recordChoice("a:1", { value: "yes", source: "board", by: "u1" });
+  s.apply({ key: "a:1", status: "running", title: "not waiting" });
+  assert.equal(s.recordChoice("a:1", { value: "yes" }).status, 409);
+
+  s.apply({ key: "a:1", status: "waiting" });
+  assert.equal(s.recordChoice("a:1", { value: "yes" }).status, 409); // no options
+
+  s.apply({ key: "a:1", status: "waiting", options: [{ label: "Yes", value: "yes" }, { label: "No", value: "no" }] });
+  assert.equal(s.recordChoice("a:1", { value: 1 }).status, 400);
+  assert.equal(s.recordChoice("a:1", { value: "maybe" }).status, 400);
+  const first = s.recordChoice("a:1", { value: "yes", by: "u1" });
   assert.equal(first.changed, true);
   assert.equal(s.get("a:1").choice.by, "u1");
+  assert.equal(s.get("a:1").choice.source, "board");
   assert.equal(s.recordChoice("a:1", { value: "yes" }).changed, false);
+  assert.equal(s.recordChoice("a:1", { value: "no" }).status, 409);
+});
+
+test("MCP/events choice_resolved always stores source chat even if client sends board", async () => {
+  const { hashToken } = await import("../src/source-tokens.js");
+  const CLAUDE_KEY = "test-claude-key-0001-padded-to-32-chars";
+  const sourceTokens = `claude-code:${hashToken(CLAUDE_KEY)}`;
+  await withServer({ sourceTokens }, async ({ base, store, rpc }) => {
+    const created = await rpc("kanban_report", {
+      title: "Forge attempt",
+      status: "waiting",
+      options: [{ label: "Go", value: "go" }, { label: "Stop", value: "stop" }],
+    }, CLAUDE_KEY);
+    assert.equal(created.result.isError, false);
+    const key = created.result.structuredContent.task_key;
+
+    const forged = await rpc("kanban_report", {
+      task_key: key,
+      status: "waiting",
+      choice_resolved: { value: "go", source: "board" },
+    }, CLAUDE_KEY);
+    assert.equal(forged.result.isError, false);
+    const choice = forged.result.structuredContent.choice;
+    assert.equal(choice.source, "chat");
+    assert.equal(choice.by, "claude-code");
+    assert.equal(store.get(key).choice.source, "chat");
+    assert.notEqual(store.get(key).choice.source, "board");
+
+    // Fresh card via /api/events with forged source:"board".
+    store.apply({
+      key: "events:1",
+      title: "Via events",
+      status: "waiting",
+      options: [{ label: "X", value: "x" }],
+    });
+    const ev = await fetch(`${base}/api/events`, json({
+      key: "events:1",
+      status: "waiting",
+      choice_resolved: { value: "x", source: "board" },
+      agent_name: "hook",
+    }, bearer()));
+    assert.equal(ev.status, 200);
+    assert.equal(store.get("events:1").choice.source, "chat");
+    assert.equal(store.get("events:1").choice.by, "hook");
+  });
+});
+
+test("POST /choice rejects non-waiting, missing options, bad value types, unknown values", async () => {
+  await withServer({}, async ({ base, store }) => {
+    const choose = (key, body) =>
+      fetch(`${base}/api/tasks/${encodeURIComponent(key)}/choice`, json(body, bearer()));
+
+    store.apply({ key: "r:1", title: "running", status: "running", options: [{ label: "A", value: "a" }] });
+    assert.equal((await choose("r:1", { value: "a" })).status, 409);
+
+    store.apply({ key: "w:1", title: "no opts", status: "waiting" });
+    assert.equal((await choose("w:1", { value: "a" })).status, 409);
+
+    store.apply({
+      key: "w:2", title: "opts", status: "waiting",
+      options: [{ label: "A", value: "a" }, { label: "B", value: "b" }],
+    });
+    assert.equal((await choose("w:2", { value: 3 })).status, 400);
+    assert.equal((await choose("w:2", { value: "c" })).status, 400);
+    assert.equal((await choose("missing", { value: "a" })).status, 404);
+
+    assert.equal((await choose("w:2", { value: "a" })).status, 200);
+    assert.equal((await choose("w:2", { value: "a" })).status, 200); // idempotent
+    assert.equal((await choose("w:2", { value: "b" })).status, 409);
+  });
+});
+
+test("new question/options round clears the live choice so the user can choose again", async () => {
+  await withServer({}, async ({ base, store, rpc }) => {
+    const created = await rpc("kanban_report", {
+      title: "Round 1",
+      status: "waiting",
+      question: "First question?",
+      options: [{ label: "Yes", value: "yes" }, { label: "No", value: "no" }],
+    });
+    const key = created.result.structuredContent.task_key;
+    await fetch(`${base}/api/tasks/${encodeURIComponent(key)}/choice`, json({ value: "yes" }, bearer()));
+    assert.equal(store.get(key).choice.value, "yes");
+
+    const round2 = await rpc("kanban_report", {
+      task_key: key,
+      status: "waiting",
+      question: "Second question after revision?",
+      options: [{ label: "Allow", value: "allow" }, { label: "Revise", value: "revise" }],
+    });
+    assert.equal(round2.result.structuredContent.choice, null);
+    assert.equal(store.get(key).choice, null);
+    assert.ok(store.get(key).events.some((e) => e.type === "choice_clear"));
+    assert.ok(store.get(key).events.some((e) => e.type === "choice" && /yes/.test(e.message)));
+
+    const again = await fetch(`${base}/api/tasks/${encodeURIComponent(key)}/choice`, json({ value: "revise" }, bearer()));
+    assert.equal(again.status, 200);
+    assert.equal(store.get(key).choice.value, "revise");
+    assert.equal(store.get(key).choice.source, "board");
+  });
 });
 
 // --- waiting aggregation (data shape the board uses) ---

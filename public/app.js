@@ -130,15 +130,17 @@ function choiceBlock(t, { compact = false } = {}) {
     })));
 }
 
-function card(t, { showParent = false } = {}) {
+function card(t, { showParent = false, hideTree = false } = {}) {
   const desc = descendants(t.key);
   const counts = {};
   for (const d of desc) counts[d.status] = (counts[d.status] || 0) + 1;
   const attention = t.status !== "waiting" && desc.some((d) => d.status === "waiting");
-  const last = t.events?.findLast((e) => e.type !== "update_request" && e.type !== "choice")?.message;
+  const last = t.events?.findLast((e) => e.type !== "update_request" && e.type !== "choice" && e.type !== "choice_clear")?.message;
   const same = (a, b) => a.slice(0, 60) === b.slice(0, 60);
   const parent = (showParent || state.flat) && t.parentKey ? state.tasks.get(t.parentKey) : null;
   const stale = staleReason(t);
+  // In 等您, every waiting card is listed once; hide the nested tree so a waiting child is not shown twice.
+  const showTree = !hideTree && !state.flat;
   return el("article", { class: `card${attention ? " attention" : ""}${stale ? " stale" : ""}${t.choice ? " chosen" : ""}`, style: `--c:var(--${t.status})`, onclick: () => openTask(t.key) },
     el("div", { class: "top" }, badge(t.source, t.agentName), t.kind && el("span", {}, t.kind), stale && el("span", { class: "flag" }, stale), t.updateRequest && el("span", { class: "flag asked", title: "Waiting for the agent to write a brief" }, "Update requested"), t.choice && el("span", { class: "flag chosen" }, "已选"), el("span", { class: "time", title: t.updatedAt }, ago(t.updatedAt))),
     parent && el("div", { class: "last parent-line" }, `父卡：${parent.title}`),
@@ -146,8 +148,8 @@ function card(t, { showParent = false } = {}) {
     t.summary && el("div", { class: "summary" }, t.summary),
     last && !(t.summary && same(last, t.summary)) && el("div", { class: "last", title: last }, last),
     choiceBlock(t, { compact: true }),
-    desc.length > 0 && el("div", { class: "rollup" }, Object.entries(counts).map(([s, n]) => el("span", { class: "pill", style: `--c:var(--${s})` }, `${n} ${STATUS_LABEL[s]}`))),
-    !state.flat && tree(t.key));
+    desc.length > 0 && !hideTree && el("div", { class: "rollup" }, Object.entries(counts).map(([s, n]) => el("span", { class: "pill", style: `--c:var(--${s})` }, `${n} ${STATUS_LABEL[s]}`))),
+    showTree && tree(t.key));
 }
 
 function renderSources() {
@@ -162,10 +164,13 @@ function cardsForColumn(colId, rootVisible) {
   if (colId !== "waiting") {
     return rootVisible.filter((t) => t.status === colId);
   }
+  // One card per waiting key (dedupe if flat mode also lists the same child).
+  const seen = new Set();
   const out = [];
   for (const t of state.tasks.values()) {
-    if (t.status !== "waiting" || !matches(t)) continue;
+    if (t.status !== "waiting" || !matches(t) || seen.has(t.key)) continue;
     if (!state.showStale && staleReason(t)) continue;
+    seen.add(t.key);
     out.push(t);
   }
   out.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
@@ -183,7 +188,10 @@ function render() {
     const cards = cardsForColumn(col.id, visible);
     return el("section", { class: "column" },
       el("h2", {}, el("span", {}, el("span", { class: "dot", style: `background:var(--${col.id})` }), col.label), el("span", {}, cards.length)),
-      cards.length ? cards.map((t) => card(t, { showParent: col.id === "waiting" && Boolean(t.parentKey) })) : el("div", { class: "empty" }, "—"));
+      cards.length ? cards.map((t) => card(t, {
+        showParent: col.id === "waiting" && Boolean(t.parentKey),
+        hideTree: col.id === "waiting",
+      })) : el("div", { class: "empty" }, "—"));
   }));
   if (state.open) renderDetail();
 }

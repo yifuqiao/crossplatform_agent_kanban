@@ -454,20 +454,21 @@ export function createServer({
       }
 
       // Needs-you option click: record the choice on the card. Opening bots poll via kanban_get_choice;
-      // the board never POSTs to the relay or any agent.
+      // the board never POSTs to the relay or any agent. Only this path may write choice.source "board".
       const choose = url.pathname.match(/^\/api\/tasks\/([^/]+)\/choice$/);
       if (choose) {
         if (req.method !== "POST") return send(res, 405, { error: "method not allowed" }, { allow: "POST" });
         const key = decodeURIComponent(choose[1]);
-        const task = store.get(key);
-        if (!task) return send(res, 404, { error: "not found" });
-        if (task.placeholder) return send(res, 409, { error: "this card only groups other tasks; choose on one of them" });
+        if (!store.get(key)) return send(res, 404, { error: "not found" });
         const body = parseJson(await readBody(req));
-        const value = body?.value;
-        if (value == null || value === "") return send(res, 400, { error: "value required" });
-        const result = store.recordChoice(key, { value: String(value), source: "board", by: sessionOk(req)?.uid });
-        if (!result) return send(res, 400, { error: "invalid choice" });
-        return send(res, 200, { ok: true, choice: task.choice, changed: result.changed });
+        if (body?.value != null && typeof body.value !== "string") {
+          return send(res, 400, { error: "value must be a string" });
+        }
+        const session = sessionOk(req);
+        const by = session?.uid || (tokenOk(req, url, token) ? "admin-token" : null);
+        const result = store.recordChoice(key, { value: body?.value, by });
+        if (result.error) return send(res, result.status, { error: result.error });
+        return send(res, 200, { ok: true, choice: store.get(key).choice, changed: result.changed });
       }
 
       const one = url.pathname.match(/^\/api\/tasks\/(.+)$/);
@@ -487,7 +488,15 @@ export function createServer({
         const results = [];
         for (const ev of events) {
           try {
-            const { task } = store.apply(ev);
+            // choice_resolved via events is always chat; never honor a forged source:"board".
+            const event = ev && typeof ev === "object" && ev.choice_resolved && typeof ev.choice_resolved === "object"
+              ? {
+                  ...ev,
+                  choice_resolved: { value: ev.choice_resolved.value },
+                  choice_by: ev.choice_by || ev.agent_name || "events",
+                }
+              : ev;
+            const { task } = store.apply(event);
             results.push({ ok: true, key: task.key, status: task.status });
           } catch (err) {
             results.push({ ok: false, error: err.message });
