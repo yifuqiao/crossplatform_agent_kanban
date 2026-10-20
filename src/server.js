@@ -8,6 +8,26 @@ import { COLUMNS } from "./status.js";
 import { handleMcp } from "./mcp.js";
 import { cursorAgentEvent, verifyCursorWebhook, createCursorCloudPoller } from "./pollers/cursor-cloud.js";
 import { createGrokRelayPoller } from "./pollers/grok-relay.js";
+import {
+  createWecomClient,
+  isWecomWired,
+  loadWecomConfig,
+  wecomSecretPath,
+  writeWecomSecret,
+} from "./wecom.js";
+import {
+  SESSION_COOKIE,
+  STATE_COOKIE,
+  SESSION_TTL_MS,
+  STATE_TTL_MS,
+  clearCookieHeader,
+  cookieHeader,
+  issueSession,
+  issueState,
+  parseCookies,
+  verifySession,
+  verifyState,
+} from "./session.js";
 
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "public");
 const STATIC = { "/": "index.html", "/app.js": "app.js", "/style.css": "style.css" };
@@ -18,6 +38,11 @@ function send(res, status, body, headers = {}) {
   const text = body === undefined ? "" : JSON.stringify(body);
   res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", ...headers });
   res.end(text);
+}
+
+function sendHtml(res, status, html, headers = {}) {
+  res.writeHead(status, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", ...headers });
+  res.end(html);
 }
 
 function readBody(req) {
@@ -64,8 +89,66 @@ function originOk(req) {
   }
 }
 
+/** next must be a path under base (e.g. /kanban/...); reject open redirects. */
+export function safeNextPath(next, base) {
+  const fallback = base ? `${base}/` : "/";
+  if (next == null || next === "") return fallback;
+  const n = String(next);
+  if (!n.startsWith("/") || n.startsWith("//") || n.includes("://") || n.includes("\\") || n.includes("..")) {
+    return fallback;
+  }
+  if (!base) return n;
+  if (n === base || n === `${base}/` || n.startsWith(`${base}/`)) return n;
+  return fallback;
+}
+
+function dataDirFromStore(store) {
+  if (store?.file) return path.dirname(store.file);
+  return null;
+}
+
+function setupWecomFormHtml({ locked, result } = {}) {
+  const notice = locked
+    ? `<p class="warn">Already configured (locked). Delete wecom.json on the server to re-enter.</p>`
+    : `<p>Paste the Agent Kanban (1000030) Secret once. It is written to disk and never shown again.</p>`;
+  const form = locked
+    ? ""
+    : `<form method="POST" action="">
+        <label>WeCom Secret <input type="password" name="secret" autocomplete="off" required></label>
+        <button type="submit">Save &amp; verify</button>
+      </form>`;
+  const resultBlock = result
+    ? `<pre class="result">errcode: ${escapeHtml(String(result.errcode))}\nerrmsg: ${escapeHtml(String(result.errmsg ?? ""))}</pre>`
+    : "";
+  return `<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WeCom setup</title>
+<style>
+  body{font-family:system-ui,sans-serif;max-width:28rem;margin:2rem auto;padding:0 1rem;line-height:1.5}
+  input{display:block;width:100%;margin:.5rem 0 1rem;padding:.5rem}
+  .warn{color:#b45309}.result{background:#f1f5f9;padding:.75rem;overflow:auto}
+</style></head><body>
+<h1>WeCom secret setup</h1>
+${notice}
+${form}
+${resultBlock}
+</body></html>`;
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+}
+
 // basePath serves the board under a sub-path, e.g. "/kanban" behind relay.example.com/kanban.
-export function createServer({ store = new Store(), token = process.env.AKB_TOKEN, cursorWebhookSecret = process.env.CURSOR_WEBHOOK_SECRET, basePath = process.env.AKB_BASE_PATH } = {}) {
+export function createServer({
+  store = new Store(),
+  token = process.env.AKB_TOKEN,
+  cursorWebhookSecret = process.env.CURSOR_WEBHOOK_SECRET,
+  basePath = process.env.AKB_BASE_PATH,
+  env = process.env,
+  fetchImpl = globalThis.fetch,
+  dataDir = dataDirFromStore(store) || env.AKB_DATA_DIR || null,
+} = {}) {
   const base = (basePath || "").replace(/\/+$/, "");
   const clients = new Set();
   const broadcast = (event, data) => {
@@ -76,6 +159,49 @@ export function createServer({ store = new Store(), token = process.env.AKB_TOKE
   store.on("remove", (keys) => broadcast("remove", keys));
   const heartbeat = setInterval(() => broadcast("ping", Date.now()), 25000);
   heartbeat.unref();
+
+  let wecomClient = null;
+  let wecomClientKey = "";
+
+  function currentConfig() {
+    return loadWecomConfig({ env, dataDir });
+  }
+
+  function wired() {
+    return isWecomWired(currentConfig());
+  }
+
+  function getWecom() {
+    const cfg = currentConfig();
+    if (!isWecomWired(cfg)) return null;
+    const key = `${cfg.corpId}\0${cfg.agentId}\0${cfg.secret}\0${cfg.publicUrl}`;
+    if (!wecomClient || wecomClientKey !== key) {
+      wecomClient = createWecomClient({
+        corpId: cfg.corpId,
+        agentId: cfg.agentId,
+        secret: cfg.secret,
+        publicUrl: cfg.publicUrl,
+        fetchImpl,
+      });
+      wecomClientKey = key;
+    }
+    return wecomClient;
+  }
+
+  function sessionOk(req) {
+    const cfg = currentConfig();
+    if (!cfg.sessionSecret) return null;
+    const cookies = parseCookies(req.headers.cookie);
+    return verifySession(cfg.sessionSecret, cookies[SESSION_COOKIE]);
+  }
+
+  function authOk(req, url) {
+    return tokenOk(req, url, token) || Boolean(sessionOk(req));
+  }
+
+  function cookiePathOpts() {
+    return { basePath: base || "/" };
+  }
 
   const server = http.createServer(async (req, res) => {
     let url;
@@ -94,12 +220,146 @@ export function createServer({ store = new Store(), token = process.env.AKB_TOKE
       else if (url.pathname !== "/health") return send(res, 404, { error: "not found" });
     }
     try {
+      if (url.pathname === "/health") {
+        return send(res, 200, { ok: true, tasks: store.tasks.size, wecom_wired: wired() });
+      }
+
+      // --- WeCom OAuth (no board auth required) ---
+      if (url.pathname === "/auth/wecom/start" && req.method === "GET") {
+        const cfg = currentConfig();
+        const client = getWecom();
+        if (!client || !cfg.sessionSecret) return send(res, 503, { error: "wecom not configured" });
+        const { state, cookie } = issueState(cfg.sessionSecret);
+        const location = client.authorizeUrl(state);
+        res.writeHead(302, {
+          location,
+          "set-cookie": cookieHeader(STATE_COOKIE, cookie, { ...cookiePathOpts(), maxAge: STATE_TTL_MS / 1000 }),
+          "cache-control": "no-store",
+        });
+        return res.end();
+      }
+
+      if (url.pathname === "/auth/wecom/callback" && req.method === "GET") {
+        const cfg = currentConfig();
+        const client = getWecom();
+        if (!client || !cfg.sessionSecret) return send(res, 503, { error: "wecom not configured" });
+        const state = url.searchParams.get("state") || "";
+        const code = url.searchParams.get("code") || "";
+        const cookies = parseCookies(req.headers.cookie);
+        if (!state || !verifyState(cfg.sessionSecret, cookies[STATE_COOKIE], state)) {
+          return sendHtml(res, 400, "<!doctype html><title>Bad state</title><p>Invalid or expired OAuth state.</p>");
+        }
+        const next = safeNextPath(url.searchParams.get("next"), base);
+        let userid;
+        try {
+          userid = await client.getuserinfo(code);
+        } catch (err) {
+          const errcode = err.errcode != null ? ` errcode=${err.errcode}` : "";
+          return sendHtml(
+            res,
+            502,
+            `<!doctype html><title>WeCom error</title><p>Could not resolve userid.${escapeHtml(errcode)}</p>`,
+            { "set-cookie": clearCookieHeader(STATE_COOKIE, cookiePathOpts()) },
+          );
+        }
+        if (!cfg.users.includes(userid)) {
+          return sendHtml(res, 403, "<!doctype html><title>Forbidden</title><p>User not allowlisted.</p>", {
+            "set-cookie": clearCookieHeader(STATE_COOKIE, cookiePathOpts()),
+          });
+        }
+        const session = issueSession(cfg.sessionSecret, userid);
+        // Default home is {base}/; `next` is honored only when it stays under the base prefix.
+        const location = url.searchParams.has("next") ? next : (base ? `${base}/` : "/");
+        res.writeHead(302, {
+          location,
+          "set-cookie": [
+            cookieHeader(SESSION_COOKIE, session, { ...cookiePathOpts(), maxAge: SESSION_TTL_MS / 1000 }),
+            clearCookieHeader(STATE_COOKIE, cookiePathOpts()),
+          ],
+          "cache-control": "no-store",
+        });
+        return res.end();
+      }
+
+      if (url.pathname === "/auth/logout" && req.method === "POST") {
+        if (!originOk(req)) return send(res, 403, { error: "cross-origin write refused" });
+        res.writeHead(204, {
+          "set-cookie": clearCookieHeader(SESSION_COOKIE, cookiePathOpts()),
+          "cache-control": "no-store",
+        });
+        return res.end();
+      }
+
+      // Setup page: AKB_TOKEN only (not session).
+      if (url.pathname === "/setup/wecom" && (req.method === "GET" || req.method === "POST")) {
+        if (!tokenOk(req, url, token)) return send(res, 401, { error: "unauthorized" });
+        if (!dataDir) return send(res, 500, { error: "AKB_DATA_DIR not configured" });
+        const locked = fs.existsSync(wecomSecretPath(dataDir));
+        if (req.method === "GET") {
+          return sendHtml(res, 200, setupWecomFormHtml({ locked }));
+        }
+        if (locked) {
+          return sendHtml(res, 409, setupWecomFormHtml({ locked: true, result: { errcode: "locked", errmsg: "wecom.json already exists" } }));
+        }
+        const raw = await readBody(req);
+        const ct = req.headers["content-type"] || "";
+        let secret = "";
+        if (ct.includes("application/json")) {
+          const body = parseJson(raw);
+          secret = body?.secret != null ? String(body.secret) : "";
+        } else {
+          const params = new URLSearchParams(raw.toString("utf8"));
+          secret = params.get("secret") || "";
+        }
+        if (!secret.trim()) {
+          return sendHtml(res, 400, setupWecomFormHtml({ locked: false, result: { errcode: "missing", errmsg: "secret required" } }));
+        }
+        try {
+          writeWecomSecret(dataDir, secret.trim());
+        } catch (err) {
+          if (err.code === "EEXIST") {
+            return sendHtml(res, 409, setupWecomFormHtml({ locked: true, result: { errcode: "locked", errmsg: "wecom.json already exists" } }));
+          }
+          throw err;
+        }
+        wecomClient = null;
+        wecomClientKey = "";
+        // Self-check gettoken with the just-written secret (env still wins if set).
+        const cfg = currentConfig();
+        let result = { errcode: 0, errmsg: "ok" };
+        if (cfg.corpId && cfg.secret) {
+          const probe = createWecomClient({
+            corpId: cfg.corpId,
+            agentId: cfg.agentId || "0",
+            secret: cfg.secret,
+            publicUrl: cfg.publicUrl || "https://example.invalid",
+            fetchImpl,
+          });
+          try {
+            await probe.gettoken();
+            result = { errcode: 0, errmsg: "ok" };
+          } catch (err) {
+            result = { errcode: err.errcode ?? "error", errmsg: err.errmsg || "gettoken failed" };
+          }
+        } else {
+          result = { errcode: "incomplete", errmsg: "saved; set AKB_WECOM_CORP_ID / AGENT_ID to verify" };
+        }
+        return sendHtml(res, 200, setupWecomFormHtml({ locked: true, result }));
+      }
+
       if (req.method === "GET" && STATIC[url.pathname]) {
+        // In WeCom, unauthenticated board root → silent OAuth.
+        if (url.pathname === "/" && wired() && !sessionOk(req) && !tokenOk(req, url, token)) {
+          const ua = String(req.headers["user-agent"] || "");
+          if (/wxwork/i.test(ua)) {
+            res.writeHead(302, { location: `${base}/auth/wecom/start`, "cache-control": "no-store" });
+            return res.end();
+          }
+        }
         const file = path.join(PUBLIC_DIR, STATIC[url.pathname]);
         res.writeHead(200, { "content-type": TYPES[path.extname(file)], "cache-control": "no-cache" });
         return fs.createReadStream(file).pipe(res);
       }
-      if (url.pathname === "/health") return send(res, 200, { ok: true, tasks: store.tasks.size });
 
       if (url.pathname === "/webhooks/cursor" && req.method === "POST") {
         const raw = await readBody(req);
@@ -114,7 +374,7 @@ export function createServer({ store = new Store(), token = process.env.AKB_TOKE
         return send(res, 200, { ok: true });
       }
 
-      if (!tokenOk(req, url, token)) return send(res, 401, { error: "unauthorized" });
+      if (!authOk(req, url)) return send(res, 401, { error: "unauthorized" });
       if (req.method !== "GET" && !originOk(req)) return send(res, 403, { error: "cross-origin write refused" });
 
       if (url.pathname === "/mcp") {

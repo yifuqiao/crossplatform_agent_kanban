@@ -65,7 +65,7 @@ async function cmdServe(f) {
   }
   const dataDir = path.resolve(f.data || process.env.AKB_DATA_DIR || path.join(os.homedir(), ".agent-kanban"));
   const store = new Store({ dataDir });
-  const server = createServer({ store });
+  const server = createServer({ store, dataDir });
   const port = Number(f.port || process.env.PORT || 7311);
   const host = f.host || process.env.AKB_HOST || "127.0.0.1";
   const pollers = pollersFromEnv(store);
