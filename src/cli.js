@@ -28,7 +28,7 @@ const USAGE = `akb — cross-platform agent kanban
   akb token-new --source S [--agent NAME]      new per-source MCP key + its AKB_SOURCE_TOKENS entry
   akb token-hash --source S [--agent NAME]     same, for a key read from stdin
 
-Env: AKB_URL (default http://127.0.0.1:7311), AKB_TOKEN, AKB_PARENT_KEY, AKB_TASK_KEY`;
+Env: AKB_URL (default http://127.0.0.1:7311), AKB_TOKEN or AKB_SOURCE_KEY, AKB_PARENT_KEY, AKB_TASK_KEY`;
 
 function flags(argv) {
   const out = { _: [] };
@@ -48,7 +48,10 @@ function flags(argv) {
 
 async function post(pathname, body, timeoutMs = 2000) {
   const headers = { "content-type": "application/json" };
-  if (process.env.AKB_TOKEN) headers.authorization = `Bearer ${process.env.AKB_TOKEN}`;
+  // AKB_SOURCE_KEY: a per-source key, for machines that must not hold AKB_TOKEN (cloud sessions).
+  // The board only accepts it on /api/events, for that source's cards.
+  const key = process.env.AKB_TOKEN || process.env.AKB_SOURCE_KEY;
+  if (key) headers.authorization = `Bearer ${key}`;
   const res = await fetch(`${BASE}${pathname}`, { method: "POST", headers, body: JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs) });
   const text = await res.text();
   if (!res.ok && res.status !== 207) throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);

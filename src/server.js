@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { timingSafeEqual } from "node:crypto";
-import { Store, publicTask } from "./store.js";
+import { Store, parseRef, publicTask } from "./store.js";
 import { COLUMNS, TERMINAL } from "./status.js";
 import { handleMcp } from "./mcp.js";
 import { matchSourceToken, parseSourceTokens } from "./source-tokens.js";
@@ -90,6 +90,40 @@ function originOk(req) {
   } catch {
     return false;
   }
+}
+
+function keyLabel(principal) {
+  return principal.agentName ? `${principal.source}@${principal.agentName}` : principal.source;
+}
+
+// A per-source key on /api/events (hooks in cloud sessions, where AKB_TOKEN must not live).
+// It may only write its own source's cards (and its bot's, when bound), never a card created
+// through MCP, and cannot set created_by. Returns the event to apply, or throws with the reason.
+export function scopeEventToKey(ev, principal, store) {
+  if (!ev || typeof ev !== "object" || Array.isArray(ev)) throw new Error("event must be an object");
+  const ref = parseRef(ev.key) || parseRef({ source: ev.source, external_id: ev.external_id ?? ev.externalId });
+  if (!ref) throw new Error("event needs source and external_id (or key)");
+  const allowed = (r) => r.source === principal.source;
+  if (!allowed(ref)) throw new Error(`this key reports as source "${principal.source}"`);
+  if (principal.agentName && ev.agent_name != null && ev.agent_name !== principal.agentName) {
+    throw new Error(`this key reports as agent "${principal.agentName}"`);
+  }
+  const sameBot = (t) => !principal.agentName || !t.agentName || t.agentName === principal.agentName;
+  // Same trimming as store.apply, so the card checked here is the card that gets written.
+  const key = `${ref.source}:${String(ref.externalId).trim().slice(0, 200)}`;
+  const card = store.get(key);
+  if (card && (card.createdBy || !sameBot(card))) throw new Error(`card ${key} is not writable with this key`);
+  if (ev.parent != null) {
+    const parent = parseRef(ev.parent);
+    const parentCard = parent && store.get(`${parent.source}:${parent.externalId}`);
+    if (!parent || !allowed(parent) || (parentCard && !sameBot(parentCard))) {
+      throw new Error(`parent must be a "${principal.source}" card`);
+    }
+  }
+  const out = { ...ev };
+  delete out.created_by;
+  if (principal.agentName) out.agent_name = principal.agentName;
+  return out;
 }
 
 /** next must be a path under base (e.g. /kanban/...); reject open redirects. */
@@ -225,6 +259,46 @@ export function createServer({
 
   function cookiePathOpts() {
     return { basePath: base || "/" };
+  }
+
+  // principal: null for AKB_TOKEN / board login, or { source, agentName } for a per-source key.
+  async function applyEvents(req, res, principal) {
+    const body = parseJson(await readBody(req));
+    const events = Array.isArray(body) ? body : [body];
+    const results = [];
+    for (const ev of events) {
+      try {
+        const scoped = principal ? scopeEventToKey(ev, principal, store) : ev;
+        // choice_resolved via events is always chat; never honor a forged source:"board".
+        // choice_by is server-set — ignore any caller-provided value.
+        const event = scoped && typeof scoped === "object" && scoped.choice_resolved && typeof scoped.choice_resolved === "object"
+          ? {
+              ...scoped,
+              choice_resolved: { value: scoped.choice_resolved.value },
+              choice_by: principal ? keyLabel(principal) : "events",
+            }
+          : scoped;
+        const { task, choice_rejected } = store.apply(event);
+        if (choice_rejected) {
+          results.push({
+            ok: false,
+            key: task.key,
+            status: task.status,
+            error: choice_rejected.reason,
+            choice_rejected,
+          });
+        } else {
+          results.push({ ok: true, key: task.key, status: task.status });
+        }
+      } catch (err) {
+        results.push({ ok: false, error: err.message });
+      }
+    }
+    if (!Array.isArray(body) && results[0]?.choice_rejected) {
+      return send(res, results[0].choice_rejected.status, results[0]);
+    }
+    const status = results.every((r) => r.ok) ? 200 : results.some((r) => r.ok) ? 207 : 400;
+    return send(res, status, Array.isArray(body) ? { results } : results[0]);
   }
 
   const server = http.createServer(async (req, res) => {
@@ -455,6 +529,16 @@ export function createServer({
         return out ? send(res, 200, out) : send(res, 202);
       }
 
+      // Hooks may also post events with a per-source key (Authorization header only), scoped to
+      // that source. Every other /api route still needs AKB_TOKEN or a board login.
+      if (url.pathname === "/api/events" && req.method === "POST" && !authOk(req, url)) {
+        const header = req.headers.authorization || "";
+        const entry = header.startsWith("Bearer ") ? matchSourceToken(header.slice(7), sourceEntries) : null;
+        if (!entry) return send(res, 401, { error: "unauthorized" });
+        if (!originOk(req)) return send(res, 403, { error: "cross-origin write refused" });
+        return applyEvents(req, res, { source: entry.source, agentName: entry.agentName });
+      }
+
       if (!authOk(req, url)) return send(res, 401, { error: "unauthorized" });
       if (req.method !== "GET" && !originOk(req)) return send(res, 403, { error: "cross-origin write refused" });
 
@@ -519,41 +603,7 @@ export function createServer({
       }
 
       if (url.pathname === "/api/events" && req.method === "POST") {
-        const body = parseJson(await readBody(req));
-        const events = Array.isArray(body) ? body : [body];
-        const results = [];
-        for (const ev of events) {
-          try {
-            // choice_resolved via events is always chat; never honor a forged source:"board".
-            // choice_by is server-set — ignore any caller-provided value.
-            const event = ev && typeof ev === "object" && ev.choice_resolved && typeof ev.choice_resolved === "object"
-              ? {
-                  ...ev,
-                  choice_resolved: { value: ev.choice_resolved.value },
-                  choice_by: "events",
-                }
-              : ev;
-            const { task, choice_rejected } = store.apply(event);
-            if (choice_rejected) {
-              results.push({
-                ok: false,
-                key: task.key,
-                status: task.status,
-                error: choice_rejected.reason,
-                choice_rejected,
-              });
-            } else {
-              results.push({ ok: true, key: task.key, status: task.status });
-            }
-          } catch (err) {
-            results.push({ ok: false, error: err.message });
-          }
-        }
-        if (!Array.isArray(body) && results[0]?.choice_rejected) {
-          return send(res, results[0].choice_rejected.status, results[0]);
-        }
-        const status = results.every((r) => r.ok) ? 200 : results.some((r) => r.ok) ? 207 : 400;
-        return send(res, status, Array.isArray(body) ? { results } : results[0]);
+        return applyEvents(req, res, null);
       }
 
       return send(res, 404, { error: "not found" });
