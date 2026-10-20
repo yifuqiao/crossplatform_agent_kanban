@@ -63,6 +63,9 @@ export class Store extends EventEmitter {
     this.tasks = new Map();
     this.file = dataDir ? path.join(dataDir, "state.json") : null;
     this.saveTimer = null;
+    // Keys of cards this process created. Only these may ever be dropped automatically;
+    // every card loaded from state.json stays until someone removes it.
+    this.createdThisRun = new Set();
     if (this.file) {
       this.load();
       this.tidy();
@@ -116,6 +119,7 @@ export class Store extends EventEmitter {
         events: [], seen: new Set(),
       };
       this.tasks.set(key, task);
+      this.createdThisRun.add(key);
     }
     return task;
   }
@@ -278,11 +282,12 @@ export class Store extends EventEmitter {
     return out;
   }
 
-  // A placeholder that lost its last child has nothing left to show, unless it has its own history.
+  // A placeholder this run created that lost its last child has nothing left to show, unless it has
+  // its own history. Cards loaded from state.json are never dropped here.
   dropOrRollup(key) {
     const p = this.tasks.get(key);
     if (!p) return;
-    if (p.placeholder && !this.children(key).length && !p.events?.length && !p.summary) {
+    if (p.placeholder && this.createdThisRun.has(key) && !this.children(key).length && !p.events?.length && !p.summary) {
       this.tasks.delete(key);
       this.emit("remove", [key]);
       if (p.parentKey) this.dropOrRollup(p.parentKey);
@@ -291,7 +296,8 @@ export class Store extends EventEmitter {
     }
   }
 
-  // Fix up state saved by older versions: childless placeholders, stale placeholder status.
+  // Fix up stale placeholder status in state saved by older versions. Deletes nothing at startup:
+  // dropOrRollup only drops placeholders created in this run.
   tidy() {
     for (const t of [...this.tasks.values()]) if (t.placeholder) this.dropOrRollup(t.key);
   }

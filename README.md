@@ -61,10 +61,13 @@ MCP 地址是 `https://relay.onetopway.com/kanban/mcp`，Cursor webhook 是 `htt
 | `Stop` | → Review（这一轮做完了） |
 | `SessionEnd` | → Done |
 
-**Claude Code on the web（claude.ai/code 云端会话）**：本仓库自带 [`.claude/settings.json`](.claude/settings.json)，在这个仓库里开的每个会话都会自动上报。
-只需在云端环境设置（会话标题栏的环境菜单 → Edit）里加两个环境变量：`AKB_URL=https://relay.onetopway.com/kanban` 和 `AKB_TOKEN`（看板 token），新会话生效。
-云端会话按 `claude.ai/code/session_…` 建卡并链接回会话页面；从这个会话提交给 Grok Bot 的任务也会挂在同一张卡下面。
-hook 在后台进程里发送（自动走沙箱的 HTTPS 代理），不会拖慢 Claude。
+**Claude Code on the web（claude.ai/code 云端会话）**：**不要**把管理员的 `AKB_TOKEN` 放进 claude.ai 云端环境，它能读写看板上的所有卡。
+改用来源钥匙：管理员在服务器上运行 `akb token-new --source claude-code` 生成一把（见下文“按来源分钥匙”），私下交给你。
+然后在云端环境设置（会话标题栏的环境菜单 → Edit）里加环境变量 `AKB_CLAUDE_TOKEN`（填这把钥匙），并按 [`CLAUDE.md`](CLAUDE.md) 配好 `.mcp.json`，新会话生效。
+会话里的 Claude 通过 MCP 的 `kanban_report` 开卡、更新状态，派给别的 bot 的活挂成子卡。来源钥匙只能读写 `claude-code` 自己建的卡。
+
+本仓库自带的 [`.claude/settings.json`](.claude/settings.json) hook 走 `/api/events`，只认 `AKB_TOKEN`；云端环境不放 `AKB_TOKEN` 时这些 hook 发不出去，
+它们在后台进程里发送，失败不会影响会话。需要 hook 自动上报的，只在你自己的机器上配 `AKB_TOKEN`。
 
 ### Codex CLI
 

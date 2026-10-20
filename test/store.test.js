@@ -114,7 +114,7 @@ test("a late-arriving older status does not overwrite a newer one", () => {
   assert.equal(s.get("claude-code:s").status, "running");
 });
 
-test("tidy and dropOrRollup never delete a card that has events or a summary", () => {
+test("startup never deletes a card loaded from state.json, even an empty placeholder", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "akb-"));
   const card = (key, extra) => ({ key, source: key.split(":")[0], externalId: key.split(":")[1], status: "done", placeholder: true, parentKey: null, links: [], meta: {}, events: [], seen: [], createdAt: "2026-10-19T00:00:00.000Z", updatedAt: "2026-10-19T00:00:00.000Z", ...extra });
   fs.writeFileSync(path.join(dir, "state.json"), JSON.stringify({ version: 1, tasks: [
@@ -123,7 +123,7 @@ test("tidy and dropOrRollup never delete a card that has events or a summary", (
     card("claude-chat:with-summary", { summary: "notes" }),
   ] }));
   const s = new Store({ dataDir: dir });
-  assert.equal(s.get("claude-chat:empty"), null);
+  assert.ok(s.get("claude-chat:empty"));
   assert.ok(s.get("claude-chat:with-events"));
   assert.ok(s.get("claude-chat:with-summary"));
 

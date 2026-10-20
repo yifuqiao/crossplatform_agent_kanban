@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -619,5 +620,38 @@ test("Get update: the board records the ask, the agent reads it over MCP and ans
 
     store.apply({ key, status: "done" });
     assert.equal((await ask(key)).status, 409);
+  });
+});
+
+test("Get update sends no network request: not to the agent, the relay or anywhere else", async () => {
+  const { default: https } = await import("node:https");
+  const outbound = [];
+  const realFetch = globalThis.fetch;
+  const realHttp = http.request, realHttpGet = http.get, realHttps = https.request, realHttpsGet = https.get;
+  const record = (via) => (...args) => { outbound.push(via); throw new Error("no network in this test"); };
+  const fetchImpl = async (url) => { outbound.push(`fetchImpl ${url}`); throw new Error("no network in this test"); };
+  await withServer({ token: "test-token", fetchImpl }, async (base, store) => {
+    store.apply({ key: "grok-bot:r1", status: "running", title: "Long job" });
+    store.apply({ key: "cursor-cloud:bc-1", status: "running", title: "Cursor job" });
+    globalThis.fetch = async (url, opts) => {
+      if (!String(url).startsWith(base)) outbound.push(`fetch ${url}`);
+      return realFetch(url, opts);
+    };
+    Object.assign(https, { request: record("https.request"), get: record("https.get") });
+    Object.assign(http, { request: record("http.request"), get: record("http.get") });
+    try {
+      for (const key of ["grok-bot:r1", "cursor-cloud:bc-1"]) {
+        const res = await realFetch(`${base}/api/tasks/${encodeURIComponent(key)}/update-request`, { method: "POST", headers: bearer("test-token") });
+        assert.equal(res.status, 200);
+      }
+      store.requestUpdate("grok-bot:r1", { by: "direct" });
+      await new Promise((r) => setTimeout(r, 50));
+    } finally {
+      globalThis.fetch = realFetch;
+      Object.assign(https, { request: realHttps, get: realHttpsGet });
+      Object.assign(http, { request: realHttp, get: realHttpGet });
+    }
+    assert.deepEqual(outbound, []);
+    assert.ok(store.get("grok-bot:r1").updateRequest);
   });
 });

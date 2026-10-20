@@ -183,3 +183,36 @@ test("a new task from a conversation that has a legacy card joins that card", as
   assert.equal(s.get("claude-code-web:session_01BPER2M4UidTDfYdHw8ji51"), null);
   assert.equal(s.get(LEGACY_A).status, "running");
 });
+
+test("two restarts with polls on the live state.json shape keep every card and key", async () => {
+  const { default: fs } = await import("node:fs");
+  const { default: os } = await import("node:os");
+  const { default: path } = await import("node:path");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "akb-"));
+  const state = JSON.parse(fs.readFileSync(new URL("./fixtures/state-legacy-parents.json", import.meta.url), "utf8"));
+  // Cards an older version would have dropped on startup: childless, eventless placeholders.
+  const empty = (key) => ({ ...state.tasks[0], key, externalId: key.slice(key.indexOf(":") + 1), source: key.split(":")[0], events: [], seen: [], summary: null });
+  state.tasks.push(empty("claude-chat:session_01EmptyLegacyParent"), empty("grok-bot:00000000-0000-4000-8000-0000000000aa"));
+  fs.writeFileSync(path.join(dir, "state.json"), JSON.stringify(state));
+  const keys = state.tasks.map((t) => t.key).sort();
+
+  const relayTasks = [
+    relayTask("15ee3b55-0ce7-4244-bed4-0d386611c815", "合并并上线 PR #23（图纸）", "executing", "https://claude.ai/code/session_01BPER2M4UidTDfYdHw8ji51", "2026-10-20T08:00:00.000Z"),
+    relayTask("375b898b-6074-4e6e-82c9-a132d7e99eee", "部署 agent kanban 到 relay 服务器", "finished", "session_018LiRxJRaWVn6hXRmgeyKD7", "2026-10-19T09:00:00.000Z"),
+  ];
+  const fetchImpl = async (url) => {
+    const id = url.split("/tasks/")[1];
+    const body = id ? relayTasks.find((t) => t.relayTaskId === id) : { tasks: relayTasks.map(({ updates, ...t }) => t) };
+    return { ok: true, status: 200, json: async () => body };
+  };
+  for (let run = 1; run <= 2; run++) {
+    const s = new Store({ dataDir: dir });
+    assert.deepEqual([...s.tasks.keys()].sort(), keys, `run ${run}: startup keeps every card`);
+    await createGrokRelayPoller({ store: s, baseUrl: "https://relay.example.com", keys: ["k1"], fetchImpl }).poll();
+    assert.deepEqual([...s.tasks.keys()].sort(), keys, `run ${run}: polling keeps every card`);
+    s.flush();
+  }
+  const saved = JSON.parse(fs.readFileSync(path.join(dir, "state.json"), "utf8"));
+  assert.equal(saved.tasks.length, keys.length);
+  assert.deepEqual(saved.tasks.map((t) => t.key).sort(), keys);
+});
