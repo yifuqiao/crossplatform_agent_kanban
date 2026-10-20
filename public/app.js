@@ -71,7 +71,7 @@ function matches(t) {
   return hay.includes(state.query);
 }
 
-// "grok-bot · 日川驾驶舱大总管" when the card names its bot; just the source otherwise.
+// "grok-bot · ops-bot" when the card names its bot; just the source otherwise.
 const who = (t) => (t.agentName ? `${t.source} · ${t.agentName}` : t.source);
 
 function badge(source, agentName) {

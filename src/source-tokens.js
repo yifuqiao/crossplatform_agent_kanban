@@ -2,13 +2,15 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 
 // Per-source MCP keys, in addition to the all-powerful AKB_TOKEN.
 //
-//   AKB_SOURCE_TOKENS=claude-code:<sha256 hex>,grok-bot@日川驾驶舱大总管:<sha256 hex>
+//   AKB_SOURCE_TOKENS=claude-code:<sha256 hex>,grok-bot@ops-bot:<sha256 hex>
 //
 // Each entry is `source[@agent_name]:<sha256 of the key>`. Only hashes are configured, never keys.
 // A caller using such a key can only report as that source (and that bot, when one is bound).
 // To revoke one key, delete its entry and restart the board; the other keys keep working.
 const SOURCE = /^[a-z0-9][a-z0-9._-]{0,59}$/;
 const HASH = /^[0-9a-f]{64}$/;
+// Shorter keys are refused when hashing and never match, so a weak key cannot be configured.
+export const MIN_TOKEN_LENGTH = 32;
 
 export function hashToken(token) {
   return createHash("sha256").update(String(token), "utf8").digest("hex");
@@ -41,7 +43,7 @@ export function parseSourceTokens(value) {
 
 // Returns the entry the bearer key belongs to, or null.
 export function matchSourceToken(given, entries) {
-  if (!given || !entries.length) return null;
+  if (!given || given.length < MIN_TOKEN_LENGTH || !entries.length) return null;
   const digest = Buffer.from(hashToken(given), "hex");
   let found = null;
   for (const e of entries) {

@@ -136,16 +136,22 @@ export class Store extends EventEmitter {
     const now = cleanString(input.at, 40) && !Number.isNaN(Date.parse(input.at)) ? new Date(input.at).toISOString() : new Date().toISOString();
     const key = taskKey(cleanString(ref.source, 60), cleanString(ref.externalId, 200));
     const isNew = !this.tasks.has(key);
+    // initial_status only applies when this event creates the task (e.g. a parent mentioning a child).
+    // Validate before ensure() so a rejected event leaves no placeholder card behind.
+    const rawStatus = input.status ?? (isNew || this.tasks.get(key).placeholder ? input.initial_status : undefined);
+    const status = normalizeStatus(rawStatus);
+    if (rawStatus != null && !status) throw new Error(`unknown status: ${rawStatus}`);
     const task = this.ensure(cleanString(ref.source, 60), cleanString(ref.externalId, 200), now);
+    // Who created the card through MCP (e.g. "mcp:claude-code"); pollers and hooks leave it unset.
+    if (isNew) {
+      const createdBy = cleanString(input.created_by, 200);
+      if (createdBy) task.createdBy = createdBy;
+    }
 
     const eventId = cleanString(input.event_id, 200);
     if (eventId && task.seen.has(eventId)) return { task, changed: false };
 
     const changed = [];
-    // initial_status only applies when this event creates the task (e.g. a parent mentioning a child).
-    const rawStatus = input.status ?? (isNew || task.placeholder ? input.initial_status : undefined);
-    const status = normalizeStatus(rawStatus);
-    if (rawStatus != null && !status) throw new Error(`unknown status: ${rawStatus}`);
 
     // title_mode: "replace" (default) always sets it; "first" sets it only until a real title exists;
     // "default" is a fallback label that any later title overrides.
@@ -164,7 +170,7 @@ export class Store extends EventEmitter {
     if (status || (title && mode !== "default")) task.placeholder = false;
     const kind = cleanString(input.kind, 20);
     if (kind && KNOWN_KINDS.has(kind)) task.kind = kind;
-    // Which bot/agent on that platform did the work, e.g. "日川驾驶舱大总管". Cards without it show the source only.
+    // Which bot/agent on that platform did the work, e.g. "ops-bot". Cards without it show the source only.
     const agentName = cleanString(input.agent_name, 60);
     if (agentName) task.agentName = agentName;
     const summary = cleanString(input.summary, 4000);

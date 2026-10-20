@@ -2,7 +2,7 @@
   "mcpServers": {
     "agent-kanban": {
       "type": "http",
-      "url": "https://relay.onetopway.com/kanban/mcp",
+      "url": "https://kanban.example.com/mcp",
       "headers": {
         "Authorization": "Bearer ${AKB_CLAUDE_TOKEN}"
       }

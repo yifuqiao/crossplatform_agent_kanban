@@ -12,7 +12,7 @@ import { claudeCodeEvents } from "./adapters/claude-code.js";
 import { cursorEvents, cursorHookResponse } from "./adapters/cursor.js";
 import { codexEvents } from "./adapters/codex.js";
 import { COLUMNS } from "./status.js";
-import { hashToken, newToken, parseSourceTokens } from "./source-tokens.js";
+import { hashToken, newToken, parseSourceTokens, MIN_TOKEN_LENGTH } from "./source-tokens.js";
 
 const BASE = (process.env.AKB_URL || "http://127.0.0.1:7311").replace(/\/+$/, "");
 const HOOKS = { "claude-code": claudeCodeEvents, claude: claudeCodeEvents, cursor: cursorEvents, codex: codexEvents };
@@ -233,6 +233,7 @@ async function cmdTokenNew(f) {
 async function cmdTokenHash(f) {
   const token = (await readStdin()).trim();
   if (!token) throw new Error("pipe the key on stdin, e.g. read -rs K && printf %s \"$K\" | akb token-hash --source claude-code");
+  if (token.length < MIN_TOKEN_LENGTH) throw new Error(`the key must be at least ${MIN_TOKEN_LENGTH} characters; use akb token-new for a fresh one`);
   console.log(sourceEntry(f, token));
 }
 
