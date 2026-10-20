@@ -111,3 +111,15 @@ test("resolving a project thread closes the card and the following Stop keeps it
   feed(s, claudeCodeEvents, [{ ...base, hook_event_name: "Stop" }], env);
   assert.equal(s.get(key).status, "review");
 });
+
+test("a new Claude Code session starts in Queued, and a mid-task SessionStart does not move it", () => {
+  const s = new Store();
+  const base = { session_id: "q1", cwd: "/w" };
+  feed(s, claudeCodeEvents, [{ ...base, hook_event_name: "SessionStart", source: "startup" }]);
+  assert.equal(s.get("claude-code:q1").status, "queued");
+  feed(s, claudeCodeEvents, [
+    { ...base, hook_event_name: "UserPromptSubmit", prompt: "go" },
+    { ...base, hook_event_name: "SessionStart", source: "compact" },
+  ]);
+  assert.equal(s.get("claude-code:q1").status, "running");
+});

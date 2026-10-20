@@ -27,7 +27,9 @@ export function claudeCodeEvents(payload, env = process.env) {
 
   switch (name) {
     case "SessionStart":
-      events.push({ ...base, status: "review", title: `Claude Code${remote ? " (web)" : ""} · ${folder(payload.cwd)}`, title_mode: "default", message: `Session ${payload.source || "started"}`, type: "session" });
+      // A fresh session has no work yet: it starts in Queued. initial_status leaves an existing card
+      // alone (resume / compact / clear fire SessionStart mid-task too).
+      events.push({ ...base, initial_status: "queued", title: `Claude Code${remote ? " (web)" : ""} · ${folder(payload.cwd)}`, title_mode: "default", message: `Session ${payload.source || "started"}`, type: "session" });
       break;
     case "UserPromptSubmit": {
       const prompt = promptText(payload.prompt);
