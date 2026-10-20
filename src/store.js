@@ -7,7 +7,7 @@ import { normalizeStatus, TERMINAL } from "./status.js";
 const MAX_EVENTS = 200;
 const MAX_SEEN_IDS = 500;
 // A placeholder parent takes the most urgent status among its children.
-const ROLLUP_ORDER = ["waiting", "running", "queued", "review", "failed", "done"];
+const ROLLUP_ORDER = ["waiting", "running", "planning", "queued", "review", "failed", "done"];
 const KNOWN_KINDS = new Set(["cli", "ide", "cloud", "chat", "bot", "other"]);
 
 // Default kind per source, so senders can omit it.
@@ -164,6 +164,9 @@ export class Store extends EventEmitter {
     if (status || (title && mode !== "default")) task.placeholder = false;
     const kind = cleanString(input.kind, 20);
     if (kind && KNOWN_KINDS.has(kind)) task.kind = kind;
+    // Which bot/agent on that platform did the work, e.g. "日川驾驶舱大总管". Cards without it show the source only.
+    const agentName = cleanString(input.agent_name, 60);
+    if (agentName) task.agentName = agentName;
     const summary = cleanString(input.summary, 4000);
     if (summary) task.summary = summary;
     const cwd = cleanString(input.cwd, 1000);

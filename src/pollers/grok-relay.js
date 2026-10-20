@@ -106,6 +106,7 @@ export function grokTaskEvents(detail, { listed = {}, closeCursorChildren = true
       kind: child.kind,
       title: child.title,
       title_mode: "default",
+      agent_name: child.agentName,
       url: child.url,
       status: closeWithParent ? status : undefined,
       initial_status: "running",
@@ -132,7 +133,7 @@ function wrappedActivities(rootKey, update, text) {
       const name = handoffName(text, botId);
       out.push({
         key: `handoff:${botId}`, source: SOURCE, externalId: `${rootKey.slice(SOURCE.length + 1)}/handoff/${botId}`, kind: "bot",
-        title: name ? `Handed to ${name}` : `Handed to bot ${botId.slice(0, 8)}`, handoff: true,
+        title: name ? `Handed to ${name}` : `Handed to bot ${botId.slice(0, 8)}`, handoff: true, agentName: name || undefined,
         first: oneLine(text, 300), at: update.at,
       });
     }

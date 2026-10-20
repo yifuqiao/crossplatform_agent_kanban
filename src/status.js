@@ -1,6 +1,7 @@
 // Board columns, in display order. Every adapter maps its native states onto these.
 export const COLUMNS = [
   { id: "queued", label: "Queued" },
+  { id: "planning", label: "规划中" },
   { id: "running", label: "Running" },
   { id: "waiting", label: "Needs you" },
   { id: "review", label: "Review" },
@@ -15,6 +16,7 @@ export const TERMINAL = new Set(["done", "failed"]);
 const ALIASES = {
   // generic
   todo: "queued", pending: "queued", new: "queued", created: "queued", backlog: "queued",
+  plan: "planning", planning: "planning", designing: "planning", "规划中": "planning",
   in_progress: "running", working: "running", active: "running", started: "running", busy: "running",
   blocked: "waiting", needs_input: "waiting", input_required: "waiting", paused: "waiting", idle: "review",
   completed: "done", complete: "done", success: "done", succeeded: "done", merged: "done",

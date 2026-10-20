@@ -32,7 +32,7 @@ test("POST /api/events then GET /api/tasks", async () => {
     assert.equal(res.status, 207);
     res = await fetch(`${base}/api/tasks`, { headers: bearer("test-token") });
     const { columns, tasks } = await res.json();
-    assert.equal(columns.length, 6);
+    assert.deepEqual(columns.map((c) => c.id), ["queued", "planning", "running", "waiting", "review", "done", "failed"]);
     assert.equal(tasks.length, 2);
     res = await fetch(`${base}/api/tasks/${encodeURIComponent("grok-bot:r1")}`, { headers: bearer("test-token") });
     assert.equal((await res.json()).children[0].key, "cursor-cloud:bc-1");
