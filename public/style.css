@@ -26,6 +26,8 @@ body { margin: 0; background: var(--bg); color: var(--text); }
 .card { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--c, var(--line)); border-radius: 8px; padding: 9px 10px; margin-bottom: 8px; cursor: pointer; }
 .card:hover { border-color: var(--c); }
 .card.attention { box-shadow: 0 0 0 2px var(--waiting) inset; }
+.card.stale { opacity: .6; border-left-style: dashed; }
+.flag { color: var(--waiting); font-weight: 600; }
 .card .top { display: flex; gap: 6px; align-items: center; font-size: 11px; color: var(--muted); }
 .card .title { font-weight: 600; margin: 4px 0 2px; word-break: break-word; }
 .card .summary { color: var(--muted); font-size: 12px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }

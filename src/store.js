@@ -6,6 +6,8 @@ import { normalizeStatus, TERMINAL } from "./status.js";
 
 const MAX_EVENTS = 200;
 const MAX_SEEN_IDS = 500;
+// A placeholder parent takes the most urgent status among its children.
+const ROLLUP_ORDER = ["waiting", "running", "queued", "review", "failed", "done"];
 const KNOWN_KINDS = new Set(["cli", "ide", "cloud", "chat", "bot", "other"]);
 
 // Default kind per source, so senders can omit it.
@@ -61,7 +63,10 @@ export class Store extends EventEmitter {
     this.tasks = new Map();
     this.file = dataDir ? path.join(dataDir, "state.json") : null;
     this.saveTimer = null;
-    if (this.file) this.load();
+    if (this.file) {
+      this.load();
+      this.tidy();
+    }
   }
 
   load() {
@@ -150,7 +155,9 @@ export class Store extends EventEmitter {
         task.title = title;
       }
     }
-    if (title || status) task.placeholder = false;
+    // A placeholder (a parent only known because a child named it) shows its children's status
+    // until it reports a status or a real title of its own.
+    if (status || (title && mode !== "default")) task.placeholder = false;
     const kind = cleanString(input.kind, 20);
     if (kind && KNOWN_KINDS.has(kind)) task.kind = kind;
     const summary = cleanString(input.summary, 4000);
@@ -167,9 +174,11 @@ export class Store extends EventEmitter {
     }
 
     const parent = parseRef(input.parent);
+    let oldParentKey = null;
     if (parent) {
       const parentTask = this.ensure(parent.source, parent.externalId, now);
       if (parentTask.key !== task.key && !this.wouldCycle(task.key, parentTask.key)) {
+        if (task.parentKey && task.parentKey !== parentTask.key) oldParentKey = task.parentKey;
         task.parentKey = parentTask.key;
         changed.push(parentTask);
       }
@@ -195,9 +204,51 @@ export class Store extends EventEmitter {
     }
     if (now > task.updatedAt) task.updatedAt = now;
 
+    for (const t of this.rollup(task.parentKey)) changed.push(t);
+    if (oldParentKey) this.dropOrRollup(oldParentKey);
+
     this.scheduleSave();
     for (const t of new Set([task, ...changed])) this.emit("change", t);
     return { task, changed: true };
+  }
+
+  // Recompute placeholder ancestors from their children. Returns the tasks that changed.
+  rollup(key) {
+    const out = [];
+    for (let k = key, guard = 0; k && guard < 100; guard++) {
+      const p = this.tasks.get(k);
+      if (!p || !p.placeholder) break;
+      const kids = this.children(k);
+      if (!kids.length) break;
+      const status = ROLLUP_ORDER.find((s) => kids.some((c) => c.status === s)) || "done";
+      const updatedAt = kids.reduce((m, c) => (c.updatedAt > m ? c.updatedAt : m), p.updatedAt);
+      if (status !== p.status || updatedAt !== p.updatedAt) {
+        p.status = status;
+        p.updatedAt = updatedAt;
+        p.endedAt = TERMINAL.has(status) ? updatedAt : null;
+        out.push(p);
+      }
+      k = p.parentKey;
+    }
+    return out;
+  }
+
+  // A placeholder that lost its last child has nothing left to show.
+  dropOrRollup(key) {
+    const p = this.tasks.get(key);
+    if (!p) return;
+    if (p.placeholder && !this.children(key).length) {
+      this.tasks.delete(key);
+      this.emit("remove", [key]);
+      if (p.parentKey) this.dropOrRollup(p.parentKey);
+    } else {
+      for (const t of this.rollup(key)) this.emit("change", t);
+    }
+  }
+
+  // Fix up state saved by older versions: childless placeholders, stale placeholder status.
+  tidy() {
+    for (const t of [...this.tasks.values()]) if (t.placeholder) this.dropOrRollup(t.key);
   }
 
   remove(key) {

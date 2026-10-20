@@ -10,6 +10,41 @@ const PR_URL = /^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/\d+/;
 // Relay `source` names (the chat that submitted the task) -> board sources.
 const CHAT_SOURCES = { claude: "claude-chat", chatgpt: "chatgpt", grok: "grok-chat", deepseek: "deepseek", wecom: "wecom" };
 
+const CLAUDE_CODE_SESSION = /(?:^|claude\.ai\/code\/)(session_[A-Za-z0-9]+)/;
+
+// The conversation a relay task was submitted from. Claude Code sessions report their session id
+// (or its URL) as source_thread; anything else is a chat thread on that platform.
+export function threadCard(source, thread) {
+  if (!source || typeof thread !== "string" || !thread.trim()) return null;
+  const session = thread.match(CLAUDE_CODE_SESSION);
+  if (session) {
+    return { key: `claude-code-web:${session[1]}`, kind: "cloud", title: `Claude Code · ${session[1]}`, url: `https://claude.ai/code/${session[1]}` };
+  }
+  const chat = CHAT_SOURCES[source] || source;
+  return { key: `${chat}:${thread}`, kind: "chat", title: `${chat} · ${oneLine(thread, 40)}`, url: /^https:\/\//.test(thread) ? thread : undefined };
+}
+
+const SUPERSEDES = /(?:取代|替代|代替|替换|supersedes?|replaces?)\s*(?:relay\s*)?(?:任务|task)?\s*([0-9a-f]{8})/gi;
+
+// "部署 X（取代 375b898b）": the newer task replaces an older one the relay still shows as open.
+export function supersededEvents(tasks) {
+  const events = [];
+  for (const newer of tasks) {
+    for (const m of String(newer.title || "").matchAll(SUPERSEDES)) {
+      const older = tasks.find((t) => t.relayTaskId !== newer.relayTaskId && t.relayTaskId.startsWith(m[1].toLowerCase()));
+      if (!older) continue;
+      events.push({
+        key: `${SOURCE}:${older.relayTaskId}`,
+        meta: { superseded_by: `${SOURCE}:${newer.relayTaskId}` },
+        message: `Superseded by「${oneLine(newer.title, 80)}」`,
+        event_id: `superseded:${newer.relayTaskId}`,
+        type: "superseded",
+      });
+    }
+  }
+  return events;
+}
+
 // Turns one relay task snapshot (GET /tasks/<id>) into board events: the task itself, its
 // progress timeline, and the activities Grok Bot wraps inside it (bot hand-offs, Cursor cloud agents).
 export function grokTaskEvents(detail, { listed = {}, closeCursorChildren = true } = {}) {
@@ -30,8 +65,11 @@ export function grokTaskEvents(detail, { listed = {}, closeCursorChildren = true
     meta: { relay_status: detail.status || listed.status, relay_kind: detail.kind || listed.kind, submitted_from: detail.source || null },
     at: detail.createdAt || listed.createdAt,
   };
-  if (detail.source && detail.sourceThread) {
-    root.parent = `${CHAT_SOURCES[detail.source] || detail.source}:${detail.sourceThread}`;
+  const origin = threadCard(detail.source, detail.sourceThread);
+  if (origin) {
+    root.parent = origin.key;
+    // Label the conversation card; it stays a placeholder that shows its tasks' combined status.
+    events.push({ ...origin, title_mode: "default" });
   }
   events.push({ ...root, status: "queued", message: `Submitted${detail.source ? ` from ${detail.source}` : ""}`, event_id: `${id}:submitted`, type: "submit" });
 
@@ -121,13 +159,15 @@ export function createGrokRelayPoller({ store, baseUrl, keys, limit = 50, closeC
   async function poll() {
     for (const key of keys) {
       const list = await getJson(`/tasks?limit=${limit}`, key);
-      for (const listed of list.tasks || []) {
+      const tasks = list.tasks || [];
+      for (const listed of tasks) {
         const stamp = `${listed.status}|${listed.updatedAt}`;
         if (lastSeen.get(listed.relayTaskId) === stamp) continue;
         const detail = await getJson(`/tasks/${listed.relayTaskId}`, key);
         for (const ev of grokTaskEvents(detail, { listed, closeCursorChildren })) store.apply(ev);
         lastSeen.set(listed.relayTaskId, stamp);
       }
+      for (const ev of supersededEvents(tasks)) if (store.get(ev.key)) store.apply(ev);
     }
   }
 

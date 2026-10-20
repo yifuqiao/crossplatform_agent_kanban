@@ -81,3 +81,42 @@ test("poller only refetches tasks whose status or updatedAt changed", async () =
   assert.equal(calls.filter((u) => u.includes(`/tasks/${ID}`)).length, 1);
   assert.equal(s.get(`grok-bot:${ID}`).status, "running");
 });
+
+test("Claude Code session threads become a placeholder card that rolls up its tasks", async () => {
+  const { threadCard } = await import("../src/pollers/grok-relay.js");
+  assert.equal(threadCard("claude", "https://claude.ai/code/session_01BPER2M4UidTDfYdHw8ji51").key, "claude-code-web:session_01BPER2M4UidTDfYdHw8ji51");
+  assert.equal(threadCard("claude", "session_018LiRxJRaWVn6hXRmgeyKD7").key, "claude-code-web:session_018LiRxJRaWVn6hXRmgeyKD7");
+  assert.equal(threadCard("chatgpt", "conv-1").key, "chatgpt:conv-1");
+
+  const s = new Store();
+  const thread = "https://claude.ai/code/session_01BPER2M4UidTDfYdHw8ji51";
+  const done = { ...detail, status: "finished", sourceThread: thread, completion: { event_id: "c1", status: "finished", summary: "ok" } };
+  for (const ev of grokTaskEvents(done, { listed: { ...listed, status: "finished" } })) s.apply(ev);
+  const card = s.get("claude-code-web:session_01BPER2M4UidTDfYdHw8ji51");
+  assert.equal(card.placeholder, true);
+  assert.equal(card.status, "done");
+  assert.equal(card.url, "https://claude.ai/code/session_01BPER2M4UidTDfYdHw8ji51");
+
+  s.apply({ key: "grok-bot:other", parent: card.key, title: "Second task", status: "executing" });
+  assert.equal(s.get(card.key).status, "running");
+});
+
+test("moving a child away drops an empty placeholder parent", () => {
+  const s = new Store();
+  s.apply({ key: "grok-bot:t1", parent: "claude-chat:old-thread", status: "done" });
+  assert.equal(s.get("claude-chat:old-thread").status, "done");
+  s.apply({ key: "grok-bot:t1", parent: "claude-code-web:session_x" });
+  assert.equal(s.get("claude-chat:old-thread"), null);
+});
+
+test("a task titled 取代 <id> marks the older relay task superseded", async () => {
+  const { supersededEvents } = await import("../src/pollers/grok-relay.js");
+  const tasks = [
+    { relayTaskId: "ad60c649-c58e-4cc5-9ca7-e9061d76e4a1", title: "部署 agent kanban（取代 375b898b）" },
+    { relayTaskId: "375b898b-6074-4e6e-82c9-a132d7e99eee", title: "部署 agent kanban 到 relay 服务器" },
+  ];
+  const [ev] = supersededEvents(tasks);
+  assert.equal(ev.key, "grok-bot:375b898b-6074-4e6e-82c9-a132d7e99eee");
+  assert.equal(ev.meta.superseded_by, "grok-bot:ad60c649-c58e-4cc5-9ca7-e9061d76e4a1");
+  assert.equal(supersededEvents(tasks.slice(1)).length, 0);
+});

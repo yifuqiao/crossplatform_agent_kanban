@@ -12,7 +12,8 @@ try {
 } catch {}
 const withToken = (u) => (token ? `${u}${u.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}` : u);
 
-const state = { tasks: new Map(), columns: [], hidden: new Set(), query: "", flat: false, open: null };
+const state = { tasks: new Map(), columns: [], hidden: new Set(), query: "", flat: false, showStale: false, open: null };
+const STALE_MS = 24 * 3600 * 1000;
 const $ = (id) => document.getElementById(id);
 
 function el(tag, attrs = {}, ...kids) {
@@ -47,6 +48,15 @@ function descendants(key, out = []) {
   return out;
 }
 
+// Why a card is hidden by default: replaced by a newer task, or "in progress" with no word for a day
+// (e.g. a relay task Grok Bot never reported on). The relay still calls them open; we flag them.
+function staleReason(t) {
+  if (t.meta?.superseded_by) return "Superseded";
+  if (t.status !== "queued" && t.status !== "running") return null;
+  const last = [t, ...descendants(t.key)].reduce((m, d) => (d.updatedAt > m ? d.updatedAt : m), t.updatedAt);
+  return Date.now() - Date.parse(last) > STALE_MS ? `No update for ${ago(last)}` : null;
+}
+
 function matches(t) {
   if (state.hidden.has(t.source)) return false;
   if (!state.query) return true;
@@ -76,13 +86,15 @@ function card(t) {
   for (const d of desc) counts[d.status] = (counts[d.status] || 0) + 1;
   const attention = t.status !== "waiting" && desc.some((d) => d.status === "waiting");
   const last = t.events?.at(-1)?.message;
+  const same = (a, b) => a.slice(0, 60) === b.slice(0, 60);
   const parent = state.flat && t.parentKey ? state.tasks.get(t.parentKey) : null;
-  return el("article", { class: `card${attention ? " attention" : ""}`, style: `--c:var(--${t.status})`, onclick: () => openTask(t.key) },
-    el("div", { class: "top" }, badge(t.source), t.kind && el("span", {}, t.kind), el("span", { class: "time", title: t.updatedAt }, ago(t.updatedAt))),
+  const stale = staleReason(t);
+  return el("article", { class: `card${attention ? " attention" : ""}${stale ? " stale" : ""}`, style: `--c:var(--${t.status})`, onclick: () => openTask(t.key) },
+    el("div", { class: "top" }, badge(t.source), t.kind && el("span", {}, t.kind), stale && el("span", { class: "flag" }, stale), el("span", { class: "time", title: t.updatedAt }, ago(t.updatedAt))),
     parent && el("div", { class: "last" }, `↳ ${parent.title}`),
     el("div", { class: "title" }, t.title),
     t.summary && el("div", { class: "summary" }, t.summary),
-    last && last !== t.summary && el("div", { class: "last", title: last }, last),
+    last && !(t.summary && same(last, t.summary)) && el("div", { class: "last", title: last }, last),
     desc.length > 0 && el("div", { class: "rollup" }, Object.entries(counts).map(([s, n]) => el("span", { class: "pill", style: `--c:var(--${s})` }, `${n} ${STATUS_LABEL[s]}`))),
     !state.flat && tree(t.key));
 }
@@ -95,7 +107,10 @@ function renderSources() {
 
 function render() {
   renderSources();
-  const visible = [...state.tasks.values()].filter((t) => (state.flat || isRoot(t)) && matches(t));
+  const candidates = [...state.tasks.values()].filter((t) => (state.flat || isRoot(t)) && matches(t));
+  const staleCount = candidates.filter(staleReason).length;
+  $("stale-count").textContent = staleCount;
+  const visible = state.showStale ? candidates : candidates.filter((t) => !staleReason(t));
   visible.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   $("board").replaceChildren(...state.columns.map((col) => {
     const cards = visible.filter((t) => t.status === col.id);
@@ -189,6 +204,7 @@ function scheduleRender() {
 }
 
 $("search").addEventListener("input", (e) => { state.query = e.target.value.trim().toLowerCase(); render(); });
+$("stale").addEventListener("change", (e) => { state.showStale = e.target.checked; render(); });
 $("flat").addEventListener("change", (e) => { state.flat = e.target.checked; render(); });
 $("close").addEventListener("click", () => { state.open = null; $("drawer").hidden = true; });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") $("close").click(); });
