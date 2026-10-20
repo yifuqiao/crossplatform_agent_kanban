@@ -3,7 +3,7 @@ import path from "node:path";
 import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
 import { normalizeStatus, TERMINAL } from "./status.js";
-import { junkTitle } from "./adapters/common.js";
+import { junkTitle, recoverTitle } from "./adapters/common.js";
 
 const MAX_EVENTS = 200;
 const MAX_SEEN_IDS = 500;
@@ -438,7 +438,8 @@ export class Store extends EventEmitter {
   }
 
   // State saved by older versions: hook cards were moved to 审核中 at every turn end, and some were
-  // titled with raw prompt XML. Put the first back in 进行中 as idle, and let the next prompt retitle the second.
+  // titled with raw prompt XML. Put the first back in 进行中 as idle; retitle the second from its prompts,
+  // or let its next prompt do it.
   migrate() {
     let dirty = false;
     for (const t of this.tasks.values()) {
@@ -450,7 +451,10 @@ export class Store extends EventEmitter {
         dirty = true;
       }
       if (t.titled && junkTitle(t.title)) {
-        t.titled = false;
+        // The board list only carries the last few events, so recover the person's words here, once.
+        const words = [t.title, ...(t.events || []).filter((e) => e.type === "prompt").map((e) => e.message)].map(recoverTitle).find(Boolean);
+        if (words) t.title = words;
+        else t.titled = false;
         dirty = true;
       }
     }

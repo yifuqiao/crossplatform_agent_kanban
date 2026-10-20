@@ -92,6 +92,8 @@ test("project-thread prompts are titled with the person's words, not the wake XM
   assert.equal(promptText(relay), "我觉得UI整体来看都很糟糕。");
   assert.equal(promptText(`<coordinator-relay><relay><note>Add a close signal</note></relay></coordinator-relay>`), "Add a close signal");
   assert.equal(promptText("Fix the a < b comparison"), "Fix the a < b comparison");
+  assert.equal(promptText('@"/tmp/image.png" Fix the board'), "Fix the board");
+  assert.equal(promptText("@src/app.js fix the bug"), "@src/app.js fix the bug");
   assert.equal(promptText("Handle <message>hello</message> but keep Array<Foo>"), "Handle <message>hello</message> but keep Array<Foo>");
 
   const s = new Store();
@@ -188,6 +190,8 @@ test("the agent's checklist becomes the card's subtasks", () => {
     { session_id: "c1", hook_event_name: "PostToolUse", tool_name: "TodoWrite", tool_input: { todos: [{ content: "write tests", status: "completed" }, { content: "ship", status: "in_progress" }] } },
   ]);
   assert.deepEqual(s.get(key).checklist, [{ text: "write tests", state: "done" }, { text: "ship", state: "doing" }]);
+  feed(s, claudeCodeEvents, [{ session_id: "c1", hook_event_name: "PostToolUse", tool_name: "TodoWrite", tool_input: { todos: [] } }]);
+  assert.deepEqual(s.get(key).checklist, []);
 });
 
 test("renaming the thread retitles the card", () => {

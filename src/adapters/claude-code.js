@@ -83,6 +83,7 @@ export function claudeCodeEvents(payload, env = process.env) {
       } else if (CHECKLIST_TOOL.test(payload.tool_name || "") || payload.tool_name === "TodoWrite") {
         // The agent's own step list (project-thread checklist or Claude Code's todo list) is the card's subtasks.
         const checklist = checklistItems(payload.tool_input);
+        // An empty list is an update too: it clears the card's list.
         if (checklist) {
           const done = checklist.filter((c) => c.state === "done").length;
           events.push({ ...base, checklist, message: `进度 ${done}/${checklist.length}`, type: "checklist" });
@@ -140,9 +141,10 @@ export function checklistItems(input) {
       const m = /^\s*([✓✔✱○])\s*(.+)$/.exec(line);
       if (m) items.push({ text: oneLine(m[2], 200), state: MARKS[m[1]] });
     }
+  } else {
+    return null;
   }
-  items = items.filter((i) => i.text);
-  return items.length ? items : null;
+  return items.filter((i) => i.text);
 }
 
 function responseText(res) {

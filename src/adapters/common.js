@@ -12,6 +12,7 @@ const ENTITIES = { lt: "<", gt: ">", amp: "&", quot: '"', "#39": "'", apos: "'" 
 // entity-escaped), and an attached file puts @"path" in front; a card titled with that is unreadable.
 const ENVELOPE = /^\s*(<|&lt;)(wake|coordinator-relay|relay|system-reminder|session-context)\b/i;
 const ATTACHMENTS = /^(\s*@(?:"[^"]*"|\S+))+\s*/;
+const QUOTED_ATTACHMENTS = /^(\s*@"[^"]*")+\s*/;
 
 // The person's own words from a prompt. Plain prompts come back unchanged.
 export function promptText(prompt) {
@@ -24,7 +25,8 @@ export function promptParts(prompt) {
   if (typeof prompt !== "string") return { text: "", human: false };
   const body = prompt.replace(ATTACHMENTS, "");
   // Only the known envelopes: a coding prompt that merely mentions <tags> or Array<Foo> stays as typed.
-  if (!ENVELOPE.test(body)) return { text: prompt, human: true };
+  // A plain prompt stays as typed, minus quoted @"path" attachments (an @file mention is kept).
+  if (!ENVELOPE.test(body)) return { text: prompt.replace(QUOTED_ATTACHMENTS, "") || prompt, human: true };
   const s = body
     .replace(/&(lt|gt|amp|quot|#39|apos);/g, (_, e) => ENTITIES[e])
     .replace(/<(system-reminder|system-note|session-context|untrusted-uploads)\b[^>]*>[\s\S]*?<\/\1\b[^>]*>/gi, " ");
@@ -37,6 +39,18 @@ export function promptParts(prompt) {
 }
 
 // A title saved by an older hook: raw envelope XML (maybe after @"path" attachments), or nothing.
+// The person's words from a stored title or "Prompt: …" timeline line that may have been cut off
+// mid-envelope (older hooks kept only the first 100 / 400 characters, so closing tags can be missing).
+export function recoverTitle(text) {
+  if (typeof text !== "string") return "";
+  const body = text.replace(/^Prompt: /, "").replace(ATTACHMENTS, "");
+  if (!ENVELOPE.test(body)) return "";
+  const s = body.replace(/&(lt|gt|amp|quot|#39|apos);/g, (_, e) => ENTITIES[e])
+    .replace(/<(system-reminder|system-note|session-context|untrusted-uploads)\b[^>]*>[\s\S]*?<\/\1\b[^>]*>/gi, " ");
+  const m = /<cited\b[^>]*author="user"[^>]*>([^<]+)/i.exec(s) || /<message\b[^>]*from="human"[^>]*>([^<]+)/i.exec(s);
+  return m ? oneLine(m[1], 100) : "";
+}
+
 export function junkTitle(title) {
   if (typeof title !== "string" || !title.trim()) return true;
   return ENVELOPE.test(title.replace(ATTACHMENTS, ""));
