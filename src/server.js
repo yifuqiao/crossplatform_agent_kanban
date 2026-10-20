@@ -438,6 +438,7 @@ export function createServer({
         const task = store.get(key);
         if (!task) return send(res, 404, { error: "not found" });
         if (TERMINAL.has(task.status)) return send(res, 409, { error: `task is ${task.status}` });
+        if (task.placeholder) return send(res, 409, { error: "this card only groups other tasks; ask one of them" });
         store.requestUpdate(key, { by: sessionOk(req)?.uid });
         return send(res, 200, { ok: true, updateRequest: task.updateRequest });
       }

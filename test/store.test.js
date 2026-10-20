@@ -127,4 +127,16 @@ test("update requests: polled summaries do not answer them, a brief or a termina
   s.apply({ key: "grok-bot:r1", status: "failed" });
   assert.equal(s.get("grok-bot:r1").updateRequest, null);
   assert.equal(s.requestUpdate("grok-bot:missing"), null);
+
+  // A brief that also closes the task still lands on the timeline.
+  s.apply({ key: "grok-bot:r2", status: "running", title: "Other job" });
+  s.requestUpdate("grok-bot:r2");
+  s.apply({ key: "grok-bot:r2", status: "done", summary: "final brief", brief: true });
+  assert.equal(s.get("grok-bot:r2").updateRequest, null);
+  assert.ok(s.get("grok-bot:r2").briefAt);
+  assert.equal(s.get("grok-bot:r2").events.at(-1).message, "final brief");
+
+  // Placeholders (cards that only group children) cannot be asked.
+  s.apply({ key: "cursor-cloud:bc-1", status: "running", parent: "claude-chat:thread" });
+  assert.equal(s.requestUpdate("claude-chat:thread"), null);
 });

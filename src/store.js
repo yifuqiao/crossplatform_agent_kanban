@@ -189,6 +189,7 @@ export class Store extends EventEmitter {
       }
     }
 
+    const pendingRequest = Boolean(task.updateRequest);
     // Ignore a status older than the one already shown (events can arrive out of order).
     const stale = Boolean(task.statusAt && now < task.statusAt);
     const statusChanged = Boolean(status && status !== task.status && !stale);
@@ -203,13 +204,13 @@ export class Store extends EventEmitter {
     }
 
     // A brief with no note of its own still goes on the timeline.
-    const message = cleanString(input.message, 2000) || (input.brief && task.updateRequest && summary ? summary.slice(0, 2000) : undefined);
+    const message = cleanString(input.message, 2000) || (input.brief && pendingRequest && summary ? summary.slice(0, 2000) : undefined);
     if (message || statusChanged) {
       task.events.push({ id: eventId || randomUUID(), at: now, status: status || null, message: message || null, type: cleanString(input.type, 40) || null });
       if (task.events.length > MAX_EVENTS) task.events.splice(0, task.events.length - MAX_EVENTS);
     }
     // A brief written by the agent answers an open "Get update" request.
-    if (input.brief && task.updateRequest && summary) {
+    if (input.brief && pendingRequest && summary) {
       task.updateRequest = null;
       task.briefAt = now;
     }
@@ -231,7 +232,8 @@ export class Store extends EventEmitter {
   // kanban_update_requests) and answers with a brief. Nothing is sent to the agent or the relay.
   requestUpdate(key, { by } = {}) {
     const task = this.tasks.get(key);
-    if (!task) return null;
+    // A placeholder has no agent of its own to answer; its status only rolls up from children.
+    if (!task || task.placeholder) return null;
     if (task.updateRequest) return task;
     const at = new Date().toISOString();
     task.updateRequest = { at, by: cleanString(by, 80) || null };

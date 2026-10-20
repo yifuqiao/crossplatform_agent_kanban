@@ -209,7 +209,7 @@ function renderDetail() {
 // Get update only records the ask on the card; the agent sees it the next time it talks to the
 // board over MCP and writes a brief back into the card.
 function updateControl(t) {
-  if (t.status === "done" || t.status === "failed") return null;
+  if (t.status === "done" || t.status === "failed" || t.placeholder) return null;
   if (t.updateRequest) {
     return el("div", { class: "asked-note" }, `Update requested ${ago(t.updateRequest.at)} ago. ${t.source} writes a brief here the next time it checks the board.`);
   }
