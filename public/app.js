@@ -10,7 +10,14 @@ try {
   if (token) localStorage.setItem("akb-token", token);
   else token = localStorage.getItem("akb-token");
 } catch {}
+// Drop ?token= from the address bar after stashing it (keeps shares/history cleaner).
+if (params.has("token")) {
+  params.delete("token");
+  const q = params.toString();
+  history.replaceState(null, "", `${location.pathname}${q ? `?${q}` : ""}${location.hash}`);
+}
 const withToken = (u) => (token ? `${u}${u.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}` : u);
+const inWxWork = /wxwork/i.test(navigator.userAgent || "");
 
 const state = { tasks: new Map(), columns: [], hidden: new Set(), query: "", flat: false, showStale: false, open: null };
 const STALE_MS = 24 * 3600 * 1000;
@@ -124,6 +131,10 @@ function render() {
 async function api(path, opts) {
   const res = await fetch(withToken(path), opts);
   if (res.status === 401) {
+    if (inWxWork) {
+      location.href = "auth/wecom/start";
+      return new Promise(() => {});
+    }
     const t = prompt("Board token (AKB_TOKEN):");
     if (t) {
       token = t;

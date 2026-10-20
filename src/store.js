@@ -89,11 +89,15 @@ export class Store extends EventEmitter {
 
   flush() {
     if (!this.file) return;
-    fs.mkdirSync(path.dirname(this.file), { recursive: true });
-    const tasks = [...this.tasks.values()].map((t) => ({ ...t, seen: [...t.seen] }));
-    const tmp = `${this.file}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify({ version: 1, tasks }));
-    fs.renameSync(tmp, this.file);
+    try {
+      fs.mkdirSync(path.dirname(this.file), { recursive: true, mode: 0o700 });
+      const tasks = [...this.tasks.values()].map((t) => ({ ...t, seen: [...t.seen] }));
+      const tmp = `${this.file}.${process.pid}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify({ version: 1, tasks }), { mode: 0o600 });
+      fs.renameSync(tmp, this.file);
+    } catch (err) {
+      console.error(`[akb] could not write ${this.file}: ${err.message}`);
+    }
   }
 
   get(key) {
@@ -162,10 +166,11 @@ export class Store extends EventEmitter {
     if (kind && KNOWN_KINDS.has(kind)) task.kind = kind;
     const summary = cleanString(input.summary, 4000);
     if (summary) task.summary = summary;
-    for (const field of ["cwd", "url"]) {
-      const v = cleanString(input[field], 1000);
-      if (v) task[field] = v;
-    }
+    const cwd = cleanString(input.cwd, 1000);
+    if (cwd) task.cwd = cwd;
+    // Task url: http(s) only — reject javascript:, data:, etc.
+    const url = cleanString(input.url, 1000);
+    if (url && /^https?:\/\//i.test(url)) task.url = url;
     for (const link of cleanLinks(input.links)) {
       if (!task.links.some((l) => l.url === link.url)) task.links.push(link);
     }

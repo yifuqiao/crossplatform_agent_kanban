@@ -30,7 +30,9 @@ export function cursorAgentEvent(agent) {
 }
 
 export function verifyCursorWebhook(rawBody, signature, secret) {
-  if (!secret) return true;
+  // Fail closed: an unset secret never authenticates. Callers without CURSOR_WEBHOOK_SECRET
+  // must require a valid AKB_TOKEN instead (see createServer webhook handler).
+  if (!secret) return false;
   if (typeof signature !== "string") return false;
   const expected = `sha256=${createHmac("sha256", secret).update(rawBody).digest("hex")}`;
   const a = Buffer.from(signature);
