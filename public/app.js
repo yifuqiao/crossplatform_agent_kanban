@@ -124,7 +124,7 @@ async function openTask(key) {
   state.open = key;
   $("drawer").hidden = false;
   try {
-    const { task } = await api(`/api/tasks/${encodeURIComponent(key)}`);
+    const { task } = await api(`api/tasks/${encodeURIComponent(key)}`);
     state.tasks.set(task.key, task);
   } catch {}
   renderDetail();
@@ -153,13 +153,13 @@ function renderDetail() {
           el("span", {}, e.message || STATUS_LABEL[e.status] || ""))))),
     el("button", { class: "danger", onclick: async () => {
       if (!confirm("Remove this card and its nested activity from the board?")) return;
-      await api(`/api/tasks/${encodeURIComponent(t.key)}`, { method: "DELETE" });
+      await api(`api/tasks/${encodeURIComponent(t.key)}`, { method: "DELETE" });
     } }, "Remove from board"),
   ].filter((n) => n instanceof Node));
 }
 
 function connect() {
-  const es = new EventSource(withToken("/api/stream"));
+  const es = new EventSource(withToken("api/stream"));
   es.onopen = () => $("conn").classList.add("live");
   es.onerror = () => $("conn").classList.remove("live");
   es.addEventListener("task", (e) => {
@@ -194,7 +194,7 @@ $("close").addEventListener("click", () => { state.open = null; $("drawer").hidd
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") $("close").click(); });
 setInterval(render, 30000);
 
-const { columns, tasks } = await api("/api/tasks");
+const { columns, tasks } = await api("api/tasks");
 state.columns = columns;
 for (const t of tasks) state.tasks.set(t.key, t);
 render();

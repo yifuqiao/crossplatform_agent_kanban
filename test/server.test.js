@@ -86,3 +86,16 @@ test("SSE stream pushes task changes", async () => {
     await reader.cancel();
   });
 });
+
+test("serves under a base path and redirects the bare path", async () => {
+  await withServer({ token: "", basePath: "/kanban/" }, async (base) => {
+    const bare = await fetch(`${base}/kanban?token=x`, { redirect: "manual" });
+    assert.equal(bare.status, 301);
+    assert.equal(bare.headers.get("location"), "/kanban/?token=x");
+    assert.equal((await fetch(`${base}/kanban/`)).status, 200);
+    assert.equal((await fetch(`${base}/kanban/app.js`)).status, 200);
+    assert.equal((await fetch(`${base}/kanban/api/events`, json({ key: "a:1", status: "running" }))).status, 200);
+    assert.equal((await (await fetch(`${base}/kanban/api/tasks`)).json()).tasks.length, 1);
+    assert.equal((await fetch(`${base}/api/tasks`)).status, 404);
+  });
+});

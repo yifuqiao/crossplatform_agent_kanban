@@ -64,7 +64,9 @@ function originOk(req) {
   }
 }
 
-export function createServer({ store = new Store(), token = process.env.AKB_TOKEN, cursorWebhookSecret = process.env.CURSOR_WEBHOOK_SECRET } = {}) {
+// basePath serves the board under a sub-path, e.g. "/kanban" behind relay.example.com/kanban.
+export function createServer({ store = new Store(), token = process.env.AKB_TOKEN, cursorWebhookSecret = process.env.CURSOR_WEBHOOK_SECRET, basePath = process.env.AKB_BASE_PATH } = {}) {
+  const base = (basePath || "").replace(/\/+$/, "");
   const clients = new Set();
   const broadcast = (event, data) => {
     const frame = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
@@ -77,6 +79,15 @@ export function createServer({ store = new Store(), token = process.env.AKB_TOKE
 
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url || "/", "http://localhost");
+    if (base) {
+      // The page uses relative URLs, so it must be loaded with the trailing slash.
+      if (url.pathname === base) {
+        res.writeHead(301, { location: `${base}/${url.search}` });
+        return res.end();
+      }
+      if (url.pathname.startsWith(`${base}/`)) url.pathname = url.pathname.slice(base.length);
+      else if (url.pathname !== "/health") return send(res, 404, { error: "not found" });
+    }
     try {
       if (req.method === "GET" && STATIC[url.pathname]) {
         const file = path.join(PUBLIC_DIR, STATIC[url.pathname]);

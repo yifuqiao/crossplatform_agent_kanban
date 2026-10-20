@@ -30,7 +30,9 @@ akb serve           # http://127.0.0.1:7311
 
 [`deploy/`](deploy/) 里有 systemd 服务、Caddy 反代片段、环境文件示例和部署清单 [`deploy/TASK.md`](deploy/TASK.md)。
 看板跑在 relay 同一台服务器上，监听 `127.0.0.1:7311`，由 Caddy 提供 HTTPS；本机直接轮询 relay。
-部署后在你的电脑上设置 `AKB_URL=https://<域名>` 和 `AKB_TOKEN=<token>`，hook 就会上报到线上看板。
+也可以挂在已有站点的子路径下：设置 `AKB_BASE_PATH=/kanban`，看板就在 `https://relay.onetopway.com/kanban/`。
+部署后在你的电脑上设置 `AKB_URL=https://relay.onetopway.com/kanban` 和 `AKB_TOKEN=<token>`，hook 就会上报到线上看板；
+MCP 地址是 `https://relay.onetopway.com/kanban/mcp`，Cursor webhook 是 `https://relay.onetopway.com/kanban/webhooks/cursor`。
 
 ## 看板怎么读
 

@@ -1,6 +1,6 @@
 # 部署清单：把 agent kanban 放到 relay 服务器上
 
-目标：在已经运行 grok-bot-task-relay 的服务器上运行看板，用户通过 HTTPS 网址直接打开。
+目标：在已经运行 grok-bot-task-relay 的服务器上运行看板，用户通过 https://relay.onetopway.com/kanban/ 直接打开。
 用户已批准。按顺序做，做完一项再做下一项。不要把密钥写进回复、仓库、截图或进度报告。
 
 ## 1. 拷贝代码
@@ -30,25 +30,27 @@ systemctl enable --now agent-kanban
 
 完成：
 - `curl -s http://127.0.0.1:7311/health` 返回 `"ok":true`；
-- `curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:7311/api/tasks` 返回 `401`（说明 token 生效）；
+- `curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:7311/kanban/api/tasks` 返回 `401`（说明 token 生效）；
 - `journalctl -u agent-kanban -n 30` 里有 `polling: grok-relay`，且没有 `poll failed`；
 - relay 的 `/health` 仍然正常。
 
-## 4. HTTPS 网址
+## 4. HTTPS 网址：relay.onetopway.com/kanban
 
-- 不要改动或替换现有站点（dashboard、relay）。
-- 只有在已经有指向本机的新域名时，才按 `deploy/Caddyfile.snippet` 增加一个站点反代到 `127.0.0.1:7311`。改之前 `caddy validate`，然后 reload。
-- 没有新域名时不要改 Caddy，在报告里写明缺哪个域名。
+- 看板挂在现有 relay 站点的 `/kanban` 路径下，不新建域名。环境文件里必须有 `AKB_BASE_PATH=/kanban`。
+- 在现有 `relay.onetopway.com` 的 Caddy 站点里，只按 `deploy/Caddyfile.snippet` 加 `handle /kanban*` 反代到 `127.0.0.1:7311`，并把 relay 原有的反代放进一个普通 `handle { }`。其他行保持不变，不要新建第二个同名站点。
+- 改之前先备份 Caddyfile，`caddy validate` 通过后再 reload。任何一步失败就恢复备份并报告。
+- 如果 relay 的 HTTPS 不是由这台机器上的 Caddy 终止（例如前面还有一层代理），不要改，在报告里写明实际的入口在哪里。
 
 完成：
-- `https://<域名>/health` 返回 ok；
-- `https://<域名>/api/tasks` 不带 token 返回 401；
-- 旧站点仍可访问。
+- `https://relay.onetopway.com/kanban/health` 返回 ok；
+- `https://relay.onetopway.com/kanban/api/tasks` 不带 token 返回 401；
+- `https://relay.onetopway.com/kanban` 跳转到 `/kanban/`；
+- relay 不受影响：`https://relay.onetopway.com/health` 仍正常，`/mcp` 不带钥匙仍返回 401；其他旧站点仍可访问。
 
 ## 报告
 
-finished 报告写：看板网址 `https://<域名>/`（或缺的域名）、部署的 commit、各项检查结果。
-用户打开 `https://<域名>/?token=<AKB_TOKEN>` 即可，token 只私下给，不写进报告。
+finished 报告写：看板网址 `https://relay.onetopway.com/kanban/`、部署的 commit、各项检查结果。
+用户打开 `https://relay.onetopway.com/kanban/?token=<AKB_TOKEN>` 即可，token 只私下给，不写进报告。
 
 ## 不要做的事
 
