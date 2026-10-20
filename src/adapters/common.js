@@ -8,23 +8,38 @@ export function oneLine(text, max = 120) {
 
 const ENTITIES = { lt: "<", gt: ">", amp: "&", quot: '"', "#39": "'", apos: "'" };
 
-// The person's own words from a prompt. Claude project threads wrap every prompt in
-// <wake>/<coordinator-relay> XML (sometimes entity-escaped); a card titled with that is unreadable.
-// Plain prompts come back unchanged.
+// Claude project threads wrap every prompt in <wake>/<relay>/<session-context> XML (sometimes
+// entity-escaped), and an attached file puts @"path" in front; a card titled with that is unreadable.
+const ENVELOPE = /^\s*(<|&lt;)(wake|coordinator-relay|relay|system-reminder|session-context)\b/i;
+const ATTACHMENTS = /^(\s*@(?:"[^"]*"|\S+))+\s*/;
+
+// The person's own words from a prompt. Plain prompts come back unchanged.
 export function promptText(prompt) {
-  if (typeof prompt !== "string") return "";
+  return promptParts(prompt).text;
+}
+
+// { text, human }: human is false when the words are a coordinator's note or other non-person text,
+// so a card can take a better title once the person's own message arrives.
+export function promptParts(prompt) {
+  if (typeof prompt !== "string") return { text: "", human: false };
+  const body = prompt.replace(ATTACHMENTS, "");
   // Only the known envelopes: a coding prompt that merely mentions <tags> or Array<Foo> stays as typed.
-  if (!/^\s*(<|&lt;)(wake|coordinator-relay|system-reminder)\b/i.test(prompt)) return prompt;
-  const s = prompt
+  if (!ENVELOPE.test(body)) return { text: prompt, human: true };
+  const s = body
     .replace(/&(lt|gt|amp|quot|#39|apos);/g, (_, e) => ENTITIES[e])
-    .replace(/<(system-reminder|system-note|session-context)\b[^>]*>[\s\S]*?<\/\1\b[^>]*>/gi, " ");
+    .replace(/<(system-reminder|system-note|session-context|untrusted-uploads)\b[^>]*>[\s\S]*?<\/\1\b[^>]*>/gi, " ");
   const pick = (re) => [...s.matchAll(re)].map((m) => m[1].replace(/<[^>]+>/g, " ").trim()).find(Boolean);
-  return pick(/<cited\b[^>]*author="user"[^>]*>([\s\S]*?)<\/cited>/gi)
+  const human = pick(/<cited\b[^>]*author="user"[^>]*>([\s\S]*?)<\/cited>/gi)
     || pick(/<message\b[^>]*trigger="true"[^>]*from="human"[^>]*>([\s\S]*?)<\/message>/gi)
-    || pick(/<message\b[^>]*from="human"[^>]*>([\s\S]*?)<\/message>/gi)
-    || pick(/<note>([\s\S]*?)<\/note>/gi)
-    || pick(/<message\b[^>]*>([\s\S]*?)<\/message>/gi)
-    || s.replace(/<[^>]+>/g, " ").trim();
+    || pick(/<message\b[^>]*from="human"[^>]*>([\s\S]*?)<\/message>/gi);
+  if (human) return { text: human, human: true };
+  return { text: pick(/<note>([\s\S]*?)<\/note>/gi) || pick(/<message\b[^>]*>([\s\S]*?)<\/message>/gi) || "", human: false };
+}
+
+// A title saved by an older hook: raw envelope XML (maybe after @"path" attachments), or nothing.
+export function junkTitle(title) {
+  if (typeof title !== "string" || !title.trim()) return true;
+  return ENVELOPE.test(title.replace(ATTACHMENTS, ""));
 }
 
 export function folder(cwd) {

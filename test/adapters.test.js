@@ -36,8 +36,12 @@ test("Claude Code session lifecycle with a nested subagent", () => {
   assert.equal(s.get(sub.key).status, "done");
   assert.equal(s.get(sub.key).summary, "found 3 files");
   assert.equal(s.get("claude-code:s1").status, "waiting");
+  // A finished turn is not finished work: back to 进行中, marked idle, not 审核中.
   feed(s, claudeCodeEvents, [{ ...base, hook_event_name: "Stop" }]);
-  assert.equal(s.get("claude-code:s1").status, "review");
+  assert.equal(s.get("claude-code:s1").status, "running");
+  assert.ok(s.get("claude-code:s1").idleSince);
+  // Commands are not written on the card.
+  assert.ok(!s.get("claude-code:s1").events.some((e) => /npm test/.test(e.message || "")));
 });
 
 test("AKB_PARENT_KEY nests a session; AKB_TASK_KEY reports into an existing card", () => {
@@ -93,6 +97,20 @@ test("project-thread prompts are titled with the person's words, not the wake XM
   const s = new Store();
   feed(s, claudeCodeEvents, [{ session_id: "w1", hook_event_name: "UserPromptSubmit", prompt: wake }]);
   assert.equal(s.get("claude-code:w1").title, "关掉吧");
+
+  // A spawned thread: an attachment, then session-context, then the coordinator's note. The note names the
+  // card only until the person's own message arrives.
+  const spawn = `@"/root/.claude/uploads/x/image.png" <session-context nonce="n">rules</session-context nonce="n"> <wake reason="spawn"><thread><message trigger="true" from="system">You are a Thread Session</message></thread></wake> <relay from="coordinator"><note>Clean up the review lane</note></relay>`;
+  assert.equal(promptText(spawn), "Clean up the review lane");
+  feed(s, claudeCodeEvents, [
+    { session_id: "w3", hook_event_name: "SessionStart", cwd: "/home/user/repo" },
+    { session_id: "w3", hook_event_name: "UserPromptSubmit", prompt: spawn },
+  ]);
+  assert.equal(s.get("claude-code:w3").title, "Clean up the review lane");
+  feed(s, claudeCodeEvents, [{ session_id: "w3", hook_event_name: "UserPromptSubmit", prompt: wake }]);
+  assert.equal(s.get("claude-code:w3").title, "关掉吧");
+  feed(s, claudeCodeEvents, [{ session_id: "w3", hook_event_name: "UserPromptSubmit", prompt: "later words" }]);
+  assert.equal(s.get("claude-code:w3").title, "关掉吧");
 });
 
 test("resolving a project thread closes the card and the following Stop keeps it closed", () => {
@@ -115,7 +133,70 @@ test("resolving a project thread closes the card and the following Stop keeps it
   feed(s, claudeCodeEvents, [{ ...base, hook_event_name: "PostToolUse", tool_name: "mcp__hearthbot__set_thread_resolved", tool_input: { resolved: false } }], env);
   assert.equal(s.get(key).status, "running");
   feed(s, claudeCodeEvents, [{ ...base, hook_event_name: "Stop" }], env);
+  assert.equal(s.get(key).status, "running");
+});
+
+test("only an opened PR moves a session card to 审核中, and it returns there after each later turn", () => {
+  const s = new Store();
+  const base = { session_id: "p1" };
+  const key = "claude-code:p1";
+  feed(s, claudeCodeEvents, [
+    { ...base, hook_event_name: "UserPromptSubmit", prompt: "fix the bug" },
+    { ...base, hook_event_name: "Stop" },
+  ]);
+  assert.equal(s.get(key).status, "running");
+  feed(s, claudeCodeEvents, [
+    { ...base, hook_event_name: "PostToolUse", tool_name: "mcp__github__create_pull_request", tool_input: { title: "Fix" }, tool_response: { content: [{ type: "text", text: '{"url":"https://github.com/o/r/pull/14"}' }] } },
+  ]);
   assert.equal(s.get(key).status, "review");
+  assert.deepEqual(s.get(key).links, [{ url: "https://github.com/o/r/pull/14", label: "PR" }]);
+  feed(s, claudeCodeEvents, [{ ...base, hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: "npm test" } }]);
+  assert.equal(s.get(key).status, "running");
+  feed(s, claudeCodeEvents, [{ ...base, hook_event_name: "Stop" }]);
+  assert.equal(s.get(key).status, "review");
+
+  // gh pr create works too; other Bash calls do nothing.
+  const t = new Store();
+  feed(t, claudeCodeEvents, [
+    { session_id: "p2", hook_event_name: "UserPromptSubmit", prompt: "go" },
+    { session_id: "p2", hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: { command: "git push" }, tool_response: { stdout: "https://github.com/o/r/pull/1" } },
+  ]);
+  assert.equal(t.get("claude-code:p2").status, "running");
+  feed(t, claudeCodeEvents, [{ session_id: "p2", hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: { command: "gh pr create --fill" }, tool_response: { stdout: "https://github.com/o/r/pull/2\n" } }]);
+  assert.equal(t.get("claude-code:p2").status, "review");
+});
+
+test("an idle-prompt notification is not 等您", () => {
+  const s = new Store();
+  feed(s, claudeCodeEvents, [
+    { session_id: "n1", hook_event_name: "UserPromptSubmit", prompt: "go" },
+    { session_id: "n1", hook_event_name: "Notification", notification_type: "idle_prompt", message: "Claude is waiting for your input" },
+  ]);
+  assert.equal(s.get("claude-code:n1").status, "running");
+});
+
+test("the agent's checklist becomes the card's subtasks", () => {
+  const s = new Store();
+  const key = "claude-code:c1";
+  feed(s, claudeCodeEvents, [
+    { session_id: "c1", hook_event_name: "UserPromptSubmit", prompt: "go" },
+    { session_id: "c1", hook_event_name: "PostToolUse", tool_name: "mcp__hearthbot__update_progress_checklist", tool_input: { text: "审核中清理\n\n✓ 看代码\n✱ 改规则\n○ 开 PR" } },
+  ]);
+  assert.deepEqual(s.get(key).checklist, [{ text: "看代码", state: "done" }, { text: "改规则", state: "doing" }, { text: "开 PR", state: "todo" }]);
+  assert.equal(s.get(key).status, "running");
+  feed(s, claudeCodeEvents, [
+    { session_id: "c1", hook_event_name: "PostToolUse", tool_name: "TodoWrite", tool_input: { todos: [{ content: "write tests", status: "completed" }, { content: "ship", status: "in_progress" }] } },
+  ]);
+  assert.deepEqual(s.get(key).checklist, [{ text: "write tests", state: "done" }, { text: "ship", state: "doing" }]);
+});
+
+test("renaming the thread retitles the card", () => {
+  const s = new Store();
+  feed(s, claudeCodeEvents, [
+    { session_id: "r1", hook_event_name: "UserPromptSubmit", prompt: "怎么办？" },
+    { session_id: "r1", hook_event_name: "PostToolUse", tool_name: "mcp__hearthbot__rename_thread", tool_input: { title: "清理审核中的旧卡" } },
+  ]);
+  assert.equal(s.get("claude-code:r1").title, "清理审核中的旧卡");
 });
 
 test("a new Claude Code session starts in Queued, and a mid-task SessionStart does not move it", () => {

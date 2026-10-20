@@ -3,6 +3,7 @@ import path from "node:path";
 import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
 import { normalizeStatus, TERMINAL } from "./status.js";
+import { junkTitle } from "./adapters/common.js";
 
 const MAX_EVENTS = 200;
 const MAX_SEEN_IDS = 500;
@@ -106,6 +107,7 @@ export class Store extends EventEmitter {
     this.createdThisRun = new Set();
     if (this.file) {
       this.load();
+      this.migrate();
       this.tidy();
     }
   }
@@ -181,9 +183,15 @@ export class Store extends EventEmitter {
     // initial_status only applies when this event creates the task (e.g. a parent mentioning a child).
     // Validate before ensure() so a rejected event leaves no placeholder card behind.
     const rawStatus = input.status ?? (isNew || this.tasks.get(key).placeholder ? input.initial_status : undefined);
-    const status = normalizeStatus(rawStatus);
+    let status = normalizeStatus(rawStatus);
     if (rawStatus != null && !status) throw new Error(`unknown status: ${rawStatus}`);
     const task = this.ensure(cleanString(ref.source, 60), cleanString(ref.externalId, 200), now);
+    // awaiting_review: the agent opened a PR. idle: its turn is over and it waits for the person's next
+    // word. An idle card stays in 进行中, except that one with an open PR goes back to 审核中.
+    if (input.awaiting_review === true) task.awaitingReview = true;
+    const idle = input.idle === true;
+    // A waiting card whose turn has ended no longer waits on a permission prompt: back to 进行中.
+    if (idle && !status && (task.status === "running" || task.status === "waiting")) status = task.awaitingReview ? "review" : "running";
     // Who created the card through MCP (e.g. "mcp:claude-code"); pollers and hooks leave it unset.
     if (isNew) {
       const createdBy = cleanString(input.created_by, 200);
@@ -224,6 +232,13 @@ export class Store extends EventEmitter {
     if (url && /^https?:\/\//i.test(url)) task.url = url;
     for (const link of cleanLinks(input.links)) {
       if (!task.links.some((l) => l.url === link.url)) task.links.push(link);
+    }
+    // The agent's step list, replaced whole on each update.
+    if (Array.isArray(input.checklist)) {
+      task.checklist = input.checklist
+        .map((c) => ({ text: cleanString(c?.text, 200), state: ["done", "doing", "todo"].includes(c?.state) ? c.state : "todo" }))
+        .filter((c) => c.text)
+        .slice(0, 30);
     }
     if (input.meta && typeof input.meta === "object" && !Array.isArray(input.meta)) {
       task.meta = { ...task.meta, ...input.meta };
@@ -281,6 +296,8 @@ export class Store extends EventEmitter {
     const stale = Boolean(task.statusAt && now < task.statusAt) || Boolean(input.keep_terminal && TERMINAL.has(task.status));
     const statusChanged = Boolean(status && status !== task.status && !stale);
     if (status && !stale) task.statusAt = now;
+    if (idle && !TERMINAL.has(task.status)) task.idleSince ||= now;
+    else if (status && !stale) task.idleSince = null;
     if (statusChanged) {
       task.status = status;
       if (status === "running" && !task.startedAt) task.startedAt = now;
@@ -418,6 +435,26 @@ export class Store extends EventEmitter {
     } else {
       for (const t of this.rollup(key)) this.emit("change", t);
     }
+  }
+
+  // State saved by older versions: hook cards were moved to 审核中 at every turn end, and some were
+  // titled with raw prompt XML. Put the first back in 进行中 as idle, and let the next prompt retitle the second.
+  migrate() {
+    let dirty = false;
+    for (const t of this.tasks.values()) {
+      if (t.source !== "claude-code" && t.source !== "claude-code-web") continue;
+      const last = t.events?.findLast((e) => e.status);
+      if (t.status === "review" && !t.awaitingReview && last?.type === "stop") {
+        t.status = "running";
+        t.idleSince = last.at;
+        dirty = true;
+      }
+      if (t.titled && junkTitle(t.title)) {
+        t.titled = false;
+        dirty = true;
+      }
+    }
+    if (dirty) this.scheduleSave();
   }
 
   // Fix up stale placeholder status in state saved by older versions. Deletes nothing at startup:

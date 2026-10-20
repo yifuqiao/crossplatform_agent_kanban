@@ -3,7 +3,7 @@
     "SessionStart": [{ "hooks": [{ "type": "command", "command": "akb hook claude-code", "timeout": 5 }] }],
     "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "akb hook claude-code", "timeout": 5 }] }],
     "PreToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "akb hook claude-code", "timeout": 5 }] }],
-    "PostToolUse": [{ "matcher": "Task|Agent|mcp__.*__set_thread_resolved", "hooks": [{ "type": "command", "command": "akb hook claude-code", "timeout": 5 }] }],
+    "PostToolUse": [{ "matcher": "Task|Agent|Bash|TodoWrite|mcp__.*__(set_thread_resolved|rename_thread|set_session_title|create_pull_request|update_progress_checklist)", "hooks": [{ "type": "command", "command": "akb hook claude-code", "timeout": 5 }] }],
     "Notification": [{ "hooks": [{ "type": "command", "command": "akb hook claude-code", "timeout": 5 }] }],
     "Stop": [{ "hooks": [{ "type": "command", "command": "akb hook claude-code", "timeout": 5 }] }],
     "SessionEnd": [{ "hooks": [{ "type": "command", "command": "akb hook claude-code", "timeout": 5 }] }]
