@@ -1,0 +1,13 @@
+{
+  "name": "crossplatform-agent-kanban",
+  "version": "0.1.0",
+  "description": "One kanban board for every agent task: Claude Code, Codex, Cursor (IDE/CLI/cloud), chat agents and Grok Bot, including nested sub-activities.",
+  "type": "module",
+  "bin": { "akb": "src/cli.js" },
+  "scripts": {
+    "start": "node src/cli.js serve",
+    "test": "node --test test/*.test.js"
+  },
+  "engines": { "node": ">=20" },
+  "license": "MIT"
+}

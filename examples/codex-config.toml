@@ -1,0 +1,2 @@
+# ~/.codex/config.toml — Codex calls this after every agent turn with a JSON argument.
+notify = ["akb", "hook", "codex"]

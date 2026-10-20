@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "hooks": {
+    "beforeSubmitPrompt": [{ "command": "akb hook cursor" }],
+    "afterShellExecution": [{ "command": "akb hook cursor" }],
+    "afterMCPExecution": [{ "command": "akb hook cursor" }],
+    "afterFileEdit": [{ "command": "akb hook cursor" }],
+    "afterAgentResponse": [{ "command": "akb hook cursor" }],
+    "stop": [{ "command": "akb hook cursor" }]
+  }
+}

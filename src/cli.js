@@ -1,0 +1,190 @@
+#!/usr/bin/env node
+import os from "node:os";
+import path from "node:path";
+import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { createInterface } from "node:readline";
+import { Store } from "./store.js";
+import { createServer, pollersFromEnv, startPollers } from "./server.js";
+import { applyEnvLinks } from "./adapters/common.js";
+import { claudeCodeEvents } from "./adapters/claude-code.js";
+import { cursorEvents, cursorHookResponse } from "./adapters/cursor.js";
+import { codexEvents } from "./adapters/codex.js";
+import { COLUMNS } from "./status.js";
+
+const BASE = (process.env.AKB_URL || "http://127.0.0.1:7311").replace(/\/+$/, "");
+const HOOKS = { "claude-code": claudeCodeEvents, claude: claudeCodeEvents, cursor: cursorEvents, codex: codexEvents };
+
+const USAGE = `akb — cross-platform agent kanban
+
+  akb serve [--port 7311] [--host 127.0.0.1] [--data ~/.agent-kanban] [--poll 30]
+  akb hook <claude-code|cursor|codex>          adapter for agent hooks (reads stdin / argv)
+  akb run [--title T] [--source S] [--parent K] -- <cmd...>  track any CLI process as a card
+  akb report --title T --status S [--key K] [--parent K] [--note N] [--source S]
+  akb list                                     print the board
+  akb mcp                                      stdio MCP bridge to the running board
+
+Env: AKB_URL (default http://127.0.0.1:7311), AKB_TOKEN, AKB_PARENT_KEY, AKB_TASK_KEY`;
+
+function flags(argv) {
+  const out = { _: [] };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === "--") {
+      out["--"] = argv.slice(i + 1);
+      break;
+    }
+    if (a.startsWith("--")) {
+      const [k, v] = a.slice(2).split("=", 2);
+      out[k] = v ?? (argv[i + 1] && !argv[i + 1].startsWith("--") ? argv[++i] : true);
+    } else out._.push(a);
+  }
+  return out;
+}
+
+async function post(pathname, body, timeoutMs = 2000) {
+  const headers = { "content-type": "application/json" };
+  if (process.env.AKB_TOKEN) headers.authorization = `Bearer ${process.env.AKB_TOKEN}`;
+  const res = await fetch(`${BASE}${pathname}`, { method: "POST", headers, body: JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs) });
+  const text = await res.text();
+  if (!res.ok && res.status !== 207) throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
+  return text ? JSON.parse(text) : null;
+}
+
+async function readStdin() {
+  if (process.stdin.isTTY) return "";
+  const chunks = [];
+  for await (const c of process.stdin) chunks.push(c);
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+async function cmdServe(f) {
+  const dataDir = path.resolve(f.data || process.env.AKB_DATA_DIR || path.join(os.homedir(), ".agent-kanban"));
+  const store = new Store({ dataDir });
+  const server = createServer({ store });
+  const port = Number(f.port || process.env.PORT || 7311);
+  const host = f.host || process.env.AKB_HOST || "127.0.0.1";
+  const pollers = pollersFromEnv(store);
+  server.listen(port, host, () => {
+    console.log(`[akb] board on http://${host}:${port}  (data: ${dataDir})`);
+    if (host !== "127.0.0.1" && host !== "localhost" && !process.env.AKB_TOKEN) console.warn("[akb] listening beyond localhost without AKB_TOKEN — anyone who can reach it can edit the board");
+    if (pollers.length) console.log(`[akb] polling: ${pollers.map((p) => p.name).join(", ")}`);
+  });
+  const stop = startPollers(pollers, Number(f.poll || process.env.AKB_POLL_SECONDS || 30) * 1000);
+  const shutdown = () => {
+    stop();
+    store.flush();
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 1000).unref();
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+}
+
+// Hooks must never break or slow the agent: short timeout, swallow errors, always exit 0.
+async function cmdHook(f) {
+  const which = f._[1];
+  const adapter = HOOKS[which];
+  if (!adapter) throw new Error(`unknown hook ${which}; use claude-code, cursor or codex`);
+  let payload = null;
+  try {
+    // Codex passes the JSON as the last argument; Claude Code and Cursor use stdin.
+    const raw = which === "codex" && f._[2] ? f._.slice(2).join(" ") : await readStdin();
+    payload = JSON.parse(raw);
+    const { rootKey, events } = adapter(payload);
+    if (events.length) await post("/api/events", applyEnvLinks(events, rootKey), 1500);
+  } catch (err) {
+    if (process.env.AKB_DEBUG) console.error(`[akb] hook ${which}: ${err.message}`);
+  }
+  if (which === "cursor") process.stdout.write(JSON.stringify(cursorHookResponse(payload)));
+}
+
+async function cmdRun(f) {
+  const cmd = f["--"];
+  if (!cmd?.length) throw new Error("usage: akb run [--title T] -- <command...>");
+  const source = f.source || path.basename(cmd[0]);
+  const key = `${source}:${randomUUID()}`;
+  const parent = f.parent || process.env.AKB_TASK_KEY || process.env.AKB_PARENT_KEY;
+  const report = (ev) => post("/api/events", { key, ...ev }).catch((err) => console.error(`[akb] could not reach board: ${err.message}`));
+  await report({ title: f.title || cmd.join(" ").slice(0, 100), title_mode: f.title ? "replace" : "default", kind: "cli", status: "running", parent, cwd: process.cwd(), message: `Started: ${cmd.join(" ").slice(0, 300)}` });
+  const env = { ...process.env, AKB_TASK_KEY: key };
+  delete env.AKB_PARENT_KEY;
+  const child = spawn(cmd[0], cmd.slice(1), { stdio: "inherit", env });
+  const forward = (sig) => child.kill(sig);
+  process.on("SIGINT", forward);
+  process.on("SIGTERM", forward);
+  const code = await new Promise((resolve) => {
+    child.on("error", (err) => {
+      console.error(`[akb] ${err.message}`);
+      resolve(127);
+    });
+    child.on("exit", (c, sig) => resolve(c ?? (sig ? 128 : 1)));
+  });
+  await report({ status: code === 0 ? "done" : "failed", message: `Exited with code ${code}` });
+  process.exit(code);
+}
+
+async function cmdReport(f) {
+  const key = f.key || `${f.source || "manual"}:${randomUUID()}`;
+  const out = await post("/api/events", {
+    key, title: f.title, status: f.status, message: f.note, summary: f.summary,
+    parent: f.parent || process.env.AKB_PARENT_KEY, url: f.url, kind: f.kind,
+  });
+  console.log(out.key);
+}
+
+async function cmdList() {
+  const headers = process.env.AKB_TOKEN ? { authorization: `Bearer ${process.env.AKB_TOKEN}` } : {};
+  const res = await fetch(`${BASE}/api/tasks`, { headers });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const { tasks } = await res.json();
+  const byParent = new Map();
+  for (const t of tasks) {
+    const k = t.parentKey || "";
+    if (!byParent.has(k)) byParent.set(k, []);
+    byParent.get(k).push(t);
+  }
+  const print = (t, depth) => {
+    console.log(`${"  ".repeat(depth)}${depth ? "└ " : "• "}[${t.source}] ${t.title}  (${t.status})`);
+    for (const c of byParent.get(t.key) || []) print(c, depth + 1);
+  };
+  const keys = new Set(tasks.map((t) => t.key));
+  for (const col of COLUMNS) {
+    const roots = tasks.filter((t) => t.status === col.id && (!t.parentKey || !keys.has(t.parentKey)));
+    if (!roots.length) continue;
+    console.log(`\n== ${col.label} (${roots.length})`);
+    for (const t of roots) print(t, 0);
+  }
+}
+
+// Bridges a local stdio MCP client (Claude Desktop, Cursor, Claude Code) to the board's /mcp.
+async function cmdMcp() {
+  const rl = createInterface({ input: process.stdin });
+  for await (const line of rl) {
+    if (!line.trim()) continue;
+    let msg;
+    try {
+      msg = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    try {
+      const out = await post("/mcp", msg, 10000);
+      if (out) process.stdout.write(`${JSON.stringify(out)}\n`);
+    } catch (err) {
+      if (msg.id !== undefined) process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: msg.id, error: { code: -32000, message: `agent kanban unreachable at ${BASE}: ${err.message}` } })}\n`);
+    }
+  }
+}
+
+const f = flags(process.argv.slice(2));
+const commands = { serve: cmdServe, hook: cmdHook, run: cmdRun, report: cmdReport, list: cmdList, mcp: cmdMcp };
+const fn = commands[f._[0]];
+if (!fn) {
+  console.log(USAGE);
+  process.exit(f._[0] ? 1 : 0);
+}
+fn(f).catch((err) => {
+  console.error(`[akb] ${err.message}`);
+  process.exit(1);
+});
