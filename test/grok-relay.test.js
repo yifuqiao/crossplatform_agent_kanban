@@ -120,3 +120,18 @@ test("a task titled 取代 <id> marks the older relay task superseded", async ()
   assert.equal(ev.meta.superseded_by, "grok-bot:ad60c649-c58e-4cc5-9ca7-e9061d76e4a1");
   assert.equal(supersededEvents(tasks.slice(1)).length, 0);
 });
+
+test("the board only reads from the relay: every request is a GET, nothing is submitted", async () => {
+  const s = new Store();
+  const calls = [];
+  const fetchImpl = async (url, opts = {}) => {
+    calls.push({ url, method: opts.method || "GET" });
+    return { ok: true, status: 200, json: async () => (url.includes("/tasks?") ? { tasks: [listed] } : detail) };
+  };
+  const poller = createGrokRelayPoller({ store: s, baseUrl: "https://relay.example.com", keys: ["k1"], fetchImpl });
+  await poller.poll();
+  assert.ok(calls.length > 0);
+  assert.ok(calls.every((c) => c.method === "GET"), "relay must only be read");
+  assert.ok(calls.every((c) => !/submit-task|executor/.test(c.url)));
+  assert.deepEqual(Object.keys(poller).sort(), ["log", "name", "poll"]);
+});

@@ -582,3 +582,10 @@ test("short AKB_SESSION_SECRET (<32 bytes) keeps wecom unwired", async () => {
     assert.equal((await fetch(`${base}/kanban/api/tasks`, { headers: { cookie: `${SESSION_COOKIE}=${encodeURIComponent(forged)}` } })).status, 401);
   });
 });
+
+test("there is no endpoint that dispatches tasks to the relay", async () => {
+  await withServer({ token: "t" }, async (base) => {
+    const res = await fetch(`${base}/api/grok/status-check`, json({ keys: ["grok-bot:15ee3b55-0ce7-4244-bed4-0d386611c815"] }, { authorization: "Bearer t" }));
+    assert.equal(res.status, 404);
+  });
+});
