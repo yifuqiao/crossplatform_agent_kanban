@@ -298,13 +298,16 @@ test("AKB_TOKEN keeps its full powers, including any source and agent_name", asy
   });
 });
 
-test("source keys only open /mcp, and each key can be revoked on its own", async () => {
+test("source keys only open /mcp and /api/events, and each key can be revoked on its own", async () => {
   await withServer({}, async ({ base, rpc }) => {
     for (const p of ["/api/tasks", "/api/stream"]) {
       assert.equal((await fetch(`${base}${p}`, { headers: { authorization: `Bearer ${CLAUDE_KEY}` } })).status, 401);
     }
-    const ev = await fetch(`${base}/api/events`, { method: "POST", headers: { authorization: `Bearer ${CLAUDE_KEY}`, "content-type": "application/json" }, body: "{}" });
-    assert.equal(ev.status, 401);
+    for (const p of ["/api/tasks/claude-code:x/update", "/api/tasks/claude-code:x/choice"]) {
+      assert.equal((await fetch(`${base}${p}`, { method: "POST", headers: { authorization: `Bearer ${CLAUDE_KEY}` } })).status, 401);
+    }
+    const viaQuery = await fetch(`${base}/api/events?token=${CLAUDE_KEY}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ key: "claude-code:q", status: "running" }) });
+    assert.equal(viaQuery.status, 401);
     assert.equal((await rpc("not-a-key", "kanban_list", {})).status, 401);
     assert.equal((await rpc(CLAUDE_KEY, "kanban_list", {})).status, 200);
   });
@@ -354,5 +357,77 @@ test("a per-source key only sees Get update requests on cards it can answer", as
     const answered = await rpc(CLAUDE_KEY, "kanban_report", { task_key: mine, status: "running", summary: "Halfway there" });
     assert.deepEqual(keys(answered), []);
     assert.equal(store.get(mine).updateRequest, null);
+  });
+});
+
+// --- hooks with a per-source key on /api/events ---
+
+const postEvents = (base, key, body) => fetch(`${base}/api/events`, {
+  method: "POST",
+  headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+  body: JSON.stringify(body),
+});
+
+test("a source key can post hook events for its own source", async () => {
+  await withServer({}, async ({ base, store }) => {
+    const res = await postEvents(base, CLAUDE_KEY, [
+      { source: "claude-code", external_id: "s1", status: "running", title: "Fix bug", created_by: "mcp:claude-code" },
+      { source: "claude-code", external_id: "s1/t1", parent: "claude-code:s1", status: "running", title: "Subagent" },
+    ]);
+    assert.equal(res.status, 200);
+    const card = store.get("claude-code:s1");
+    assert.equal(card.status, "running");
+    assert.equal(card.createdBy, undefined, "created_by is ignored for source keys");
+    assert.equal(store.get("claude-code:s1/t1").parentKey, "claude-code:s1");
+    const done = await postEvents(base, CLAUDE_KEY, { key: "claude-code:s1", status: "done" });
+    assert.equal(done.status, 200);
+    assert.equal(store.get("claude-code:s1").status, "done");
+  });
+});
+
+test("a source key cannot write other sources, other bots, or MCP-created cards", async () => {
+  await withServer({}, async ({ base, store, rpc }) => {
+    store.apply({ key: "grok-bot:r1", title: "Deploy", status: "running" });
+    let res = await postEvents(base, CLAUDE_KEY, { key: "grok-bot:r1", status: "done" });
+    assert.equal(res.status, 400);
+    assert.equal(store.get("grok-bot:r1").status, "running");
+
+    res = await postEvents(base, CLAUDE_KEY, { source: "claude-code", external_id: "s2", parent: "grok-bot:r2", status: "running" });
+    assert.equal(res.status, 400);
+    assert.equal(store.get("grok-bot:r2"), null, "no placeholder in another source");
+    assert.equal(store.get("claude-code:s2"), null);
+
+    const made = await rpc(CLAUDE_KEY, "kanban_report", { title: "MCP card", status: "running" });
+    const mcpKey = made.body.result.structuredContent.task_key;
+    res = await postEvents(base, CLAUDE_KEY, { key: mcpKey, status: "failed" });
+    assert.equal(res.status, 400);
+    res = await postEvents(base, CLAUDE_KEY, { source: "claude-code", external_id: ` ${mcpKey.slice("claude-code:".length)} `, status: "failed" });
+    assert.equal(res.status, 400);
+    res = await postEvents(base, CLAUDE_KEY, { key: mcpKey.replace("claude-code", "Claude-Code"), status: "failed" });
+    assert.equal(res.status, 400);
+    assert.equal(store.get(mcpKey).status, "running");
+
+    store.apply({ key: "grok-bot:other", title: "Other bot", status: "running", agent_name: "assistant-bot" });
+    res = await postEvents(base, BOT_KEY, { key: "grok-bot:other", status: "done" });
+    assert.equal(res.status, 400);
+    res = await postEvents(base, BOT_KEY, { key: "grok-bot:mine", status: "running", agent_name: "assistant-bot" });
+    assert.equal(res.status, 400);
+    res = await postEvents(base, BOT_KEY, { key: "grok-bot:mine", status: "running" });
+    assert.equal(res.status, 200);
+    assert.equal(store.get("grok-bot:mine").agentName, "示例机器人");
+
+    // A bot-bound key cannot claim an unassigned card (e.g. a relay root), but can nest under it.
+    store.apply({ key: "grok-bot:relay1", title: "Relay task", status: "running" });
+    res = await postEvents(base, BOT_KEY, { key: "grok-bot:relay1", status: "done", title: "hijack" });
+    assert.equal(res.status, 400);
+    assert.equal(store.get("grok-bot:relay1").status, "running");
+    assert.equal(store.get("grok-bot:relay1").agentName, undefined);
+    res = await postEvents(base, BOT_KEY, { key: "grok-bot:relay1/step", parent: "grok-bot:relay1", status: "running" });
+    assert.equal(res.status, 200);
+    assert.equal(store.get("grok-bot:relay1/step").parentKey, "grok-bot:relay1");
+
+    const mixed = await postEvents(base, CLAUDE_KEY, [{ key: "claude-code:ok", status: "running" }, { key: "cursor:x", status: "running" }]);
+    assert.equal(mixed.status, 207);
+    assert.equal(store.get("cursor:x"), null);
   });
 });

@@ -66,8 +66,10 @@ MCP 地址是 `https://relay.onetopway.com/kanban/mcp`，Cursor webhook 是 `htt
 然后在云端环境设置（会话标题栏的环境菜单 → Edit）里加环境变量 `AKB_CLAUDE_TOKEN`（填这把钥匙），并按 [`CLAUDE.md`](CLAUDE.md) 配好 `.mcp.json`，新会话生效。
 会话里的 Claude 通过 MCP 的 `kanban_report` 开卡、更新状态，派给别的 bot 的活挂成子卡。来源钥匙只能读写 `claude-code` 自己建的卡。
 
-本仓库自带的 [`.claude/settings.json`](.claude/settings.json) hook 走 `/api/events`，只认 `AKB_TOKEN`；云端环境不放 `AKB_TOKEN` 时这些 hook 发不出去，
-它们在后台进程里发送，失败不会影响会话。需要 hook 自动上报的，只在你自己的机器上配 `AKB_TOKEN`。
+本仓库自带的 [`.claude/settings.json`](.claude/settings.json) hook 走 `/api/events`。云端会话里不放 `AKB_TOKEN`，改用来源钥匙让 hook 自动上报：
+管理员运行 `akb token-new --source claude-code-web` 生成一把，在云端环境里设 `AKB_URL=https://<看板地址>` 和 `AKB_SOURCE_KEY=<这把钥匙>`，
+并让环境的网络策略放行看板域名。这样会话卡的状态（运行中 / 等你 / 一轮结束 / 子 agent）由 hook 自动更新，不再依赖 Claude 记得调 `kanban_report`。
+hook 在后台进程里发送，失败不会影响会话。
 
 ### Codex CLI
 
@@ -152,7 +154,8 @@ akb token-new --source grok-bot --agent ops-bot
 - `kanban_list` 只返回自己来源的卡，`kanban_get` 读别的来源的卡返回 `No task`。
 - 钥匙绑定了 bot 名（`@名字`）时，`agent_name` 固定为该名字，传别的名字会被拒绝；读和挂子卡也只限这个 bot 的卡。
 - 钥匙至少 32 个字符（`akb token-new` 生成的是 43 个）；更短的钥匙 `token-hash` 拒绝，看板也不认。
-- 来源钥匙只能访问 `/mcp`，不能调 `/api/*`，也不能用 `?token=`，只认 `Authorization: Bearer`。
+- 来源钥匙只能访问 `/mcp` 和 `POST /api/events`（给 hook 用，`akb` 读 `AKB_SOURCE_KEY`），不能调其他 `/api/*`，也不能用 `?token=`，只认 `Authorization: Bearer`。
+- 在 `/api/events` 上，来源钥匙只能写自己来源（绑定 bot 时只限该 bot）的卡，`parent` 也必须是自己来源的卡；通过 MCP 建的卡不能用 hook 改，`created_by` 会被忽略。
 - 作废某一把：从 `AKB_SOURCE_TOKENS` 删掉那一条再重启，其他钥匙不受影响。条目格式不对时看板拒绝启动，报错只写第几条，不回显内容。
 - `AKB_TOKEN` 的行为不变：任何来源、任何 `agent_name` 都可以。
 

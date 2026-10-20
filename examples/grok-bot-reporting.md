@@ -8,7 +8,12 @@ summaries. With them, every inner step gets its own card, status and links.
 ## Where the board is
 
 - `AKB_URL`, for example `https://kanban.example.com` (must be reachable from where Grok Bot runs)
-- `AKB_TOKEN`, sent as `Authorization: Bearer <AKB_TOKEN>`. Keep it out of task text and chat.
+- A `grok-bot` source key, sent as `Authorization: Bearer <key>`. The board admin makes one with
+  `akb token-new --source grok-bot` (add `--agent <bot>` to bind it to one bot) and hands it over
+  privately. Keep it out of task text and chat. Do not give Grok Bot the admin `AKB_TOKEN`.
+  The key can only write `grok-bot:*` cards and only nest them under `grok-bot:*` cards. A key bound
+  to a bot writes only cards carrying that bot's name; it can nest under the relay task's card but
+  not change it, so use an unbound key if the bot should also close the relay task's own card.
 
 ## The task's own card
 
@@ -19,7 +24,7 @@ card for it; nest your inner activities under it with `parent`.
 
 ```http
 POST {AKB_URL}/api/events
-Authorization: Bearer <AKB_TOKEN>
+Authorization: Bearer <grok-bot key>
 Content-Type: application/json
 
 {
@@ -41,17 +46,27 @@ Content-Type: application/json
 - Optional: `summary`, `url`, `links: [{"url": "...", "label": "PR"}]`, `meta: {...}`.
 - A list of events can be sent in one request as a JSON array.
 
+## Keep running cards fresh
+
+The board flags a running card as **Silent** after 30 minutes without an event, because a card
+that says "running" but has gone quiet is the main reason the board stops being trusted.
+While a task or inner activity is running, send an event at least every 15 minutes, even if it
+only says what step you are on. Always send the final `done` or `failed`; never leave a card
+running after the work stopped.
+
 ## Cursor cloud agents
 
-When you launch a Cursor cloud agent, report it with the Cursor agent id so the board's Cursor
-poller merges into the same card:
+A `grok-bot` key cannot write `cursor-cloud:*` cards. Mention the `bc-…` id in the relay progress
+summary instead: the board nests the agent under the relay task and its Cursor poller keeps the
+status current. With the admin `AKB_TOKEN` you can also report it directly with the Cursor agent
+id so the poller merges into the same card:
 
 ```json
 { "key": "cursor-cloud:bc-xxxxxxxx", "parent": "grok-bot:<relay_task_id>", "status": "running",
   "title": "Fix DRAWING_STORE fail-closed", "url": "https://cursor.com/agents?id=bc-xxxxxxxx" }
 ```
 
-Also mention the `bc-…` id in the relay progress summary; the board picks it up from there too.
+Either way, mention the `bc-…` id in the relay progress summary; the board picks it up from there too.
 
 ## CLI agents you start
 
