@@ -78,7 +78,12 @@ export function createServer({ store = new Store(), token = process.env.AKB_TOKE
   heartbeat.unref();
 
   const server = http.createServer(async (req, res) => {
-    const url = new URL(req.url || "/", "http://localhost");
+    let url;
+    try {
+      url = new URL(req.url || "/", "http://localhost");
+    } catch {
+      return send(res, 400, { error: "bad request" });
+    }
     if (base) {
       // The page uses relative URLs, so it must be loaded with the trailing slash.
       if (url.pathname === base) {
