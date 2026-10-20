@@ -30,6 +30,8 @@ body { margin: 0; background: var(--bg); color: var(--text); }
 .flag { color: var(--waiting); font-weight: 600; }
 .flag.asked { color: var(--running); }
 .flag.chosen { color: var(--done); }
+.flag.silent { color: var(--failed); }
+.flag.self { color: #64748b; font-weight: 500; }
 .asked-note { margin: 20px 0 0; color: var(--running); font-size: 13px; }
 .parent-line { color: var(--waiting); font-weight: 500; }
 .choice-block { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }

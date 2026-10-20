@@ -21,6 +21,8 @@ const inWxWork = /wxwork/i.test(navigator.userAgent || "");
 
 const state = { tasks: new Map(), columns: [], hidden: new Set(), query: "", flat: false, showStale: false, open: null };
 const STALE_MS = 24 * 3600 * 1000;
+// A running/planning card with no event for this long is flagged on the board (still shown).
+const SILENT_MS = 30 * 60 * 1000;
 const $ = (id) => document.getElementById(id);
 
 function el(tag, attrs = {}, ...kids) {
@@ -60,9 +62,25 @@ function descendants(key, out = []) {
 function staleReason(t) {
   if (t.meta?.superseded_by) return "Superseded";
   if (t.status !== "queued" && t.status !== "planning" && t.status !== "running") return null;
-  const last = [t, ...descendants(t.key)].reduce((m, d) => (d.updatedAt > m ? d.updatedAt : m), t.updatedAt);
+  const last = lastHeard(t);
   return Date.now() - Date.parse(last) > STALE_MS ? `No update for ${ago(last)}` : null;
 }
+
+// Newest update on the card or anything nested under it.
+function lastHeard(t) {
+  return [t, ...descendants(t.key)].reduce((m, d) => (d.updatedAt > m ? d.updatedAt : m), t.updatedAt);
+}
+
+// Says "in progress" but nothing has reported for a while: the agent may have stopped without saying so.
+function silentReason(t) {
+  if (t.status !== "planning" && t.status !== "running") return null;
+  const last = lastHeard(t);
+  return Date.now() - Date.parse(last) > SILENT_MS ? `Silent ${ago(last)}` : null;
+}
+
+// Cards an agent opened itself through MCP move only when it remembers to report;
+// hook and poller cards follow the agent's real lifecycle.
+const selfReported = (t) => typeof t.createdBy === "string" && t.createdBy.startsWith("mcp:");
 
 function matches(t) {
   if (state.hidden.has(t.source)) return false;
@@ -139,10 +157,12 @@ function card(t, { showParent = false, hideTree = false } = {}) {
   const same = (a, b) => a.slice(0, 60) === b.slice(0, 60);
   const parent = (showParent || state.flat) && t.parentKey ? state.tasks.get(t.parentKey) : null;
   const stale = staleReason(t);
+  const silent = !stale && silentReason(t);
+  const heard = lastHeard(t);
   // In 等您, every waiting card is listed once; hide the nested tree so a waiting child is not shown twice.
   const showTree = !hideTree && !state.flat;
   return el("article", { class: `card${attention ? " attention" : ""}${stale ? " stale" : ""}${t.choice ? " chosen" : ""}`, style: `--c:var(--${t.status})`, onclick: () => openTask(t.key) },
-    el("div", { class: "top" }, badge(t.source, t.agentName), t.kind && el("span", {}, t.kind), stale && el("span", { class: "flag" }, stale), t.updateRequest && el("span", { class: "flag asked", title: "Waiting for the agent to write a brief" }, "Update requested"), t.choice && el("span", { class: "flag chosen" }, "已选"), el("span", { class: "time", title: t.updatedAt }, ago(t.updatedAt))),
+    el("div", { class: "top" }, badge(t.source, t.agentName), t.kind && el("span", {}, t.kind), stale && el("span", { class: "flag" }, stale), silent && el("span", { class: "flag silent", title: "Still marked in progress, but nothing has reported since. The agent may have stopped without saying so." }, silent), selfReported(t) && el("span", { class: "flag self", title: "Updated only when the agent reports through MCP, not by hooks or pollers" }, "self-reported"), t.updateRequest && el("span", { class: "flag asked", title: "Waiting for the agent to write a brief" }, "Update requested"), t.choice && el("span", { class: "flag chosen" }, "已选"), el("span", { class: "time", title: `Last heard ${new Date(heard).toLocaleString()}` }, `${ago(heard)} ago`)),
     parent && el("div", { class: "last parent-line" }, `父卡：${parent.title}`),
     el("div", { class: "title" }, t.title),
     t.summary && el("div", { class: "summary" }, t.summary),
