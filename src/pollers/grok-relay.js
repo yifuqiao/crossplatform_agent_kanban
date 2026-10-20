@@ -14,13 +14,17 @@ const CLAUDE_CODE_SESSION = /(?:^|claude\.ai\/code\/)(session_[A-Za-z0-9]+)/;
 
 // The conversation a relay task was submitted from. Claude Code sessions report their session id
 // (or its URL) as source_thread; anything else is a chat thread on that platform.
+// legacyKey: the key older versions gave a Claude Code session card ("claude-chat:<thread>").
 export function threadCard(source, thread) {
   if (!source || typeof thread !== "string" || !thread.trim()) return null;
+  const chat = CHAT_SOURCES[source] || source;
   const session = thread.match(CLAUDE_CODE_SESSION);
   if (session) {
-    return { key: `claude-code-web:${session[1]}`, kind: "cloud", title: `Claude Code · ${session[1]}`, url: `https://claude.ai/code/${session[1]}` };
+    return {
+      key: `claude-code-web:${session[1]}`, kind: "cloud", title: `Claude Code · ${session[1]}`, url: `https://claude.ai/code/${session[1]}`,
+      legacyKey: `${chat}:${thread}`,
+    };
   }
-  const chat = CHAT_SOURCES[source] || source;
   return { key: `${chat}:${thread}`, kind: "chat", title: `${chat} · ${oneLine(thread, 40)}`, url: /^https:\/\//.test(thread) ? thread : undefined };
 }
 
@@ -47,7 +51,9 @@ export function supersededEvents(tasks) {
 
 // Turns one relay task snapshot (GET /tasks/<id>) into board events: the task itself, its
 // progress timeline, and the activities Grok Bot wraps inside it (bot hand-offs, Cursor cloud agents).
-export function grokTaskEvents(detail, { listed = {}, closeCursorChildren = true } = {}) {
+// existing(key): the board's current card, if any. A task keeps the parent it already has, and a
+// conversation that already has a card under its legacy key keeps that card.
+export function grokTaskEvents(detail, { listed = {}, closeCursorChildren = true, existing = () => null } = {}) {
   const id = detail.relayTaskId || listed.relayTaskId;
   if (!id) return [];
   const rootKey = `${SOURCE}:${id}`;
@@ -66,10 +72,16 @@ export function grokTaskEvents(detail, { listed = {}, closeCursorChildren = true
     at: detail.createdAt || listed.createdAt,
   };
   const origin = threadCard(detail.source, detail.sourceThread);
-  if (origin) {
-    root.parent = origin.key;
+  const currentParent = existing(rootKey)?.parentKey;
+  if (currentParent) {
+    root.parent = currentParent;
+  } else if (origin?.legacyKey && existing(origin.legacyKey)) {
+    root.parent = origin.legacyKey;
+  } else if (origin) {
+    const { legacyKey, ...card } = origin;
+    root.parent = card.key;
     // Label the conversation card; it stays a placeholder that shows its tasks' combined status.
-    events.push({ ...origin, title_mode: "default" });
+    events.push({ ...card, title_mode: "default" });
   }
   events.push({ ...root, status: "queued", message: `Submitted${detail.source ? ` from ${detail.source}` : ""}`, event_id: `${id}:submitted`, type: "submit" });
 
@@ -164,7 +176,7 @@ export function createGrokRelayPoller({ store, baseUrl, keys, limit = 50, closeC
         const stamp = `${listed.status}|${listed.updatedAt}`;
         if (lastSeen.get(listed.relayTaskId) === stamp) continue;
         const detail = await getJson(`/tasks/${listed.relayTaskId}`, key);
-        for (const ev of grokTaskEvents(detail, { listed, closeCursorChildren })) store.apply(ev);
+        for (const ev of grokTaskEvents(detail, { listed, closeCursorChildren, existing: (k) => store.get(k) })) store.apply(ev);
         lastSeen.set(listed.relayTaskId, stamp);
       }
       for (const ev of supersededEvents(tasks)) if (store.get(ev.key)) store.apply(ev);

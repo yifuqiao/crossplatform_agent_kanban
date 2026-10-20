@@ -113,3 +113,21 @@ test("a late-arriving older status does not overwrite a newer one", () => {
   s.apply({ key: "claude-code:s", status: "running", at: "2026-10-20T09:00:03Z" });
   assert.equal(s.get("claude-code:s").status, "running");
 });
+
+test("tidy and dropOrRollup never delete a card that has events or a summary", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "akb-"));
+  const card = (key, extra) => ({ key, source: key.split(":")[0], externalId: key.split(":")[1], status: "done", placeholder: true, parentKey: null, links: [], meta: {}, events: [], seen: [], createdAt: "2026-10-19T00:00:00.000Z", updatedAt: "2026-10-19T00:00:00.000Z", ...extra });
+  fs.writeFileSync(path.join(dir, "state.json"), JSON.stringify({ version: 1, tasks: [
+    card("claude-chat:empty"),
+    card("claude-chat:with-events", { events: [{ id: "e1", at: "2026-10-19T00:00:00.000Z", status: null, message: "hello", type: null }] }),
+    card("claude-chat:with-summary", { summary: "notes" }),
+  ] }));
+  const s = new Store({ dataDir: dir });
+  assert.equal(s.get("claude-chat:empty"), null);
+  assert.ok(s.get("claude-chat:with-events"));
+  assert.ok(s.get("claude-chat:with-summary"));
+
+  s.apply({ key: "grok-bot:t1", parent: "claude-chat:with-events", status: "done" });
+  s.apply({ key: "grok-bot:t1", parent: "claude-chat:elsewhere" });
+  assert.ok(s.get("claude-chat:with-events"), "moving its child away does not delete it");
+});

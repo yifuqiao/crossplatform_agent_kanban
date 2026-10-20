@@ -1,0 +1,158 @@
+{
+ "version": 1,
+ "tasks": [
+  {
+   "key": "claude-chat:https://claude.ai/code/session_01BPER2M4UidTDfYdHw8ji51",
+   "source": "claude-chat",
+   "externalId": "https://claude.ai/code/session_01BPER2M4UidTDfYdHw8ji51",
+   "kind": "chat",
+   "title": "claude-chat · https://claude.ai/code/session_01BPER2M…",
+   "status": "running",
+   "summary": null,
+   "parentKey": null,
+   "cwd": null,
+   "url": "https://claude.ai/code/session_01BPER2M4UidTDfYdHw8ji51",
+   "links": [],
+   "meta": {},
+   "placeholder": true,
+   "createdAt": "2026-10-19T08:11:00.591Z",
+   "updatedAt": "2026-10-19T08:11:00.591Z",
+   "startedAt": null,
+   "endedAt": null,
+   "events": [],
+   "seen": []
+  },
+  {
+   "key": "claude-chat:session_018LiRxJRaWVn6hXRmgeyKD7",
+   "source": "claude-chat",
+   "externalId": "session_018LiRxJRaWVn6hXRmgeyKD7",
+   "kind": "chat",
+   "title": "claude-chat · session_018LiRxJRaWVn6hXRmgeyKD7",
+   "status": "done",
+   "summary": null,
+   "parentKey": null,
+   "cwd": null,
+   "url": null,
+   "links": [],
+   "meta": {},
+   "placeholder": true,
+   "createdAt": "2026-10-19T09:30:00.000Z",
+   "updatedAt": "2026-10-19T09:30:00.000Z",
+   "startedAt": null,
+   "endedAt": "2026-10-19T09:30:00.000Z",
+   "events": [],
+   "seen": []
+  },
+  {
+   "key": "grok-bot:15ee3b55-0ce7-4244-bed4-0d386611c815",
+   "source": "grok-bot",
+   "externalId": "15ee3b55-0ce7-4244-bed4-0d386611c815",
+   "kind": "bot",
+   "title": "合并并上线 PR #23（图纸）",
+   "status": "running",
+   "summary": null,
+   "parentKey": "claude-chat:https://claude.ai/code/session_01BPER2M4UidTDfYdHw8ji51",
+   "cwd": null,
+   "url": null,
+   "links": [],
+   "meta": {
+    "relay_status": "executing",
+    "relay_kind": "task",
+    "submitted_from": "claude"
+   },
+   "placeholder": false,
+   "createdAt": "2026-10-19T08:11:00.591Z",
+   "updatedAt": "2026-10-19T08:11:00.591Z",
+   "startedAt": "2026-10-19T08:11:00.591Z",
+   "endedAt": null,
+   "statusAt": "2026-10-19T08:11:00.591Z",
+   "titled": false,
+   "events": [
+    {
+     "id": "15ee3b55-0ce7-4244-bed4-0d386611c815:submitted",
+     "at": "2026-10-19T08:11:00.591Z",
+     "status": "queued",
+     "message": "Submitted from claude",
+     "type": "submit"
+    }
+   ],
+   "seen": [
+    "15ee3b55-0ce7-4244-bed4-0d386611c815:submitted"
+   ]
+  },
+  {
+   "key": "grok-bot:375b898b-6074-4e6e-82c9-a132d7e99eee",
+   "source": "grok-bot",
+   "externalId": "375b898b-6074-4e6e-82c9-a132d7e99eee",
+   "kind": "bot",
+   "title": "部署 agent kanban 到 relay 服务器",
+   "status": "done",
+   "summary": null,
+   "parentKey": "claude-chat:session_018LiRxJRaWVn6hXRmgeyKD7",
+   "cwd": null,
+   "url": null,
+   "links": [],
+   "meta": {
+    "relay_status": "finished",
+    "relay_kind": "task",
+    "submitted_from": "claude"
+   },
+   "placeholder": false,
+   "createdAt": "2026-10-19T09:00:00.000Z",
+   "updatedAt": "2026-10-19T09:00:00.000Z",
+   "startedAt": "2026-10-19T09:00:00.000Z",
+   "endedAt": "2026-10-19T09:00:00.000Z",
+   "statusAt": "2026-10-19T09:00:00.000Z",
+   "titled": false,
+   "events": [
+    {
+     "id": "375b898b-6074-4e6e-82c9-a132d7e99eee:submitted",
+     "at": "2026-10-19T09:00:00.000Z",
+     "status": "queued",
+     "message": "Submitted from claude",
+     "type": "submit"
+    }
+   ],
+   "seen": [
+    "375b898b-6074-4e6e-82c9-a132d7e99eee:submitted"
+   ]
+  },
+  {
+   "key": "grok-bot:ad60c649-c58e-4cc5-9ca7-e9061d76e4a1",
+   "source": "grok-bot",
+   "externalId": "ad60c649-c58e-4cc5-9ca7-e9061d76e4a1",
+   "kind": "bot",
+   "title": "部署 agent kanban（取代 375b898b）",
+   "status": "done",
+   "summary": null,
+   "parentKey": "claude-chat:session_018LiRxJRaWVn6hXRmgeyKD7",
+   "cwd": null,
+   "url": null,
+   "links": [],
+   "meta": {
+    "relay_status": "finished",
+    "relay_kind": "task",
+    "submitted_from": "claude"
+   },
+   "placeholder": false,
+   "createdAt": "2026-10-19T09:30:00.000Z",
+   "updatedAt": "2026-10-19T09:30:00.000Z",
+   "startedAt": "2026-10-19T09:30:00.000Z",
+   "endedAt": "2026-10-19T09:30:00.000Z",
+   "statusAt": "2026-10-19T09:30:00.000Z",
+   "titled": false,
+   "events": [
+    {
+     "id": "ad60c649-c58e-4cc5-9ca7-e9061d76e4a1:submitted",
+     "at": "2026-10-19T09:30:00.000Z",
+     "status": "queued",
+     "message": "Submitted from claude",
+     "type": "submit"
+    }
+   ],
+   "seen": [
+    "ad60c649-c58e-4cc5-9ca7-e9061d76e4a1:submitted"
+   ]
+  }
+ ]
+}
