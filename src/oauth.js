@@ -405,7 +405,9 @@ export function createOauth({
 
   function page(res, sendHtml, status, html, headers = {}) {
     sendHtml(res, status, html, {
-      "referrer-policy": "no-referrer",
+      // Not "no-referrer": browsers then send `Origin: null` on the consent form POST and
+      // originOk refuses it. same-origin still keeps the URL from leaving the board.
+      "referrer-policy": "same-origin",
       "x-content-type-options": "nosniff",
       ...FRAME_HEADERS,
       ...headers,
