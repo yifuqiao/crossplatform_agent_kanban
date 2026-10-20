@@ -1,11 +1,19 @@
 # Serve the board at https://relay.onetopway.com/kanban/ inside the EXISTING relay site.
 #
-# Add ONLY the `handle /kanban*` block below, as the first block inside the existing
-# relay.onetopway.com { ... } site. Leave every existing line of that site exactly as it is.
+# Add BOTH handle blocks below inside the existing relay.onetopway.com { ... } site.
+# Put /WW_verify_* ABOVE /kanban*. Leave every existing line of that site exactly as it is.
 # Do not create a second relay.onetopway.com site. Do not touch any other site.
-# Requests outside /kanban never enter this block, so the relay keeps answering them as before.
+# After editing: caddy validate → caddy reload --config <Caddyfile> --adapter caddyfile
+# (caddy.service has no ExecReload — do NOT systemctl restart/reload caddy).
+#
+# Verify files live in /opt/agent-kanban-verify (root:root 755); only WW_verify_*.txt for app 1000030.
 # The board strips /kanban itself (AKB_BASE_PATH=/kanban), so no URI rewriting is needed.
 
-    handle /kanban* {
-        reverse_proxy 127.0.0.1:7311
-    }
+	handle /WW_verify_* {
+		root * /opt/agent-kanban-verify
+		file_server
+	}
+
+	handle /kanban* {
+		reverse_proxy 127.0.0.1:7311
+	}

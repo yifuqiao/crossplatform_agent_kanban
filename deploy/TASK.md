@@ -54,17 +54,52 @@ systemctl enable --now agent-kanban
 
 先确认第 3 步全部通过，否则不做这一步。
 
-- 如果 relay 的 HTTPS 不是由这台机器上的 Caddy 终止（例如前面还有一层代理、或 Caddy 站点只 `bind 127.0.0.1`），不要改任何东西，在报告里写明实际的入口在哪里。
+- **现网拓扑**：haproxy `:443` 按 SNI 透传 → Caddy `127.0.0.1:4443` 终止 TLS。relay 站点 `bind 127.0.0.1` 是正常配置，**可以**在该站点里加 `handle` 块；不要因为看到 bind 环回就停手。若确认 TLS 根本不在本机 Caddy 终止，再停下来报告实际入口。
 - 备份：`cp /etc/caddy/Caddyfile /etc/caddy/Caddyfile.bak-agent-kanban-$(date +%Y%m%d%H%M%S)`（如果 Caddyfile 在别的位置，备份实际文件）。
-- 在现有 `relay.onetopway.com { ... }` 站点里，**只新增** `deploy/Caddyfile.snippet` 中的 `handle /kanban* { reverse_proxy 127.0.0.1:7311 }`，放在站点块内第一行。站点里原有的每一行都保持原样；不新建第二个同名站点；不改其他站点。
-- `caddy validate --config <Caddyfile> --adapter caddyfile` 通过后，再 `systemctl reload caddy`（用 reload，不要 restart）。validate 不通过就恢复备份，不 reload。
-- reload 后立刻对比第 0 步的基线。**任何一项和基线不同**：恢复备份、`systemctl reload caddy`、再次确认基线恢复，然后报告 failed。
+- 在现有 `relay.onetopway.com { ... }` 站点里，按下面顺序新增两个 `handle`（都放在站点块靠前位置；**`/WW_verify_*` 必须在 `/kanban*` 之上**）。站点里原有的每一行都保持原样；不新建第二个同名站点；不改其他站点。
+
+```
+	handle /WW_verify_* {
+		root * /opt/agent-kanban-verify
+		file_server
+	}
+
+	handle /kanban* {
+		reverse_proxy 127.0.0.1:7311
+	}
+```
+
+- 创建校验目录（一次）：`mkdir -p /opt/agent-kanban-verify && chown root:root /opt/agent-kanban-verify && chmod 755 /opt/agent-kanban-verify`。只放 1000030 后台下载的 `WW_verify_*.txt`（不是密钥）。
+- **Caddy 生效方式（重要）**：`caddy.service` **没有** `ExecReload`，禁止 `systemctl restart caddy` / `systemctl reload caddy`。流程固定为：
+  1. 备份 Caddyfile（见上）
+  2. `caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile`（路径以实机为准）
+  3. 通过后：`caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile`
+  - validate 不通过就恢复备份，**不要** reload。
+- reload 后立刻对比第 0 步的基线。**任何一项和基线不同**：恢复备份、再次 `caddy reload --config ... --adapter caddyfile`、确认基线恢复，然后报告 failed。
 
 完成：
 - 第 0 步的基线全部不变；
-- `https://relay.onetopway.com/kanban/health` 返回 ok；
+- `https://relay.onetopway.com/kanban/health` 返回 ok（**不含** `wecom_wired`；接线状态见需鉴权的 `GET /kanban/api/tasks`）；
 - `https://relay.onetopway.com/kanban/api/tasks` 不带 token 返回 401；
-- `https://relay.onetopway.com/kanban` 跳转到 `/kanban/`。
+- `https://relay.onetopway.com/kanban` 跳转到 `/kanban/`；
+- 放入校验文件后 `https://relay.onetopway.com/WW_verify_<xxx>.txt` 返回 200，且仅该文件。
+
+## 4b. 企微静默登录（AgentId 1000030）— 后台配置顺序
+
+代码已支持；**本仓不自动改服务器**。在中继上按顺序做（Secret 不经聊天）：
+
+1. `/etc/agent-kanban.env` 补齐非密钥项（见 `deploy/agent-kanban.env.example`）：`AKB_PUBLIC_URL`、`AKB_WECOM_CORP_ID`、`AKB_WECOM_AGENT_ID=1000030`、`AKB_WECOM_USERS=QiaoYiFu`、`AKB_SESSION_SECRET`（至少 32 字节，推荐 `openssl rand -hex 32`，不要复用 `AKB_TOKEN`）。**不要**在 env 里写 Secret（除非走方案 B）。
+2. `systemctl restart agent-kanban`（只重启看板单元，不动 Caddy/relay）。
+3. 企微管理后台 → Agent Kanban(1000030)：
+   - 可信域名 `relay.onetopway.com`（先把 `WW_verify_*.txt` 放到 `/opt/agent-kanban-verify/` 再点校验）
+   - 企业可信 IP `82.157.187.207`
+   - 应用主页 `https://relay.onetopway.com/kanban/`
+4. Secret 录入（推荐方案 A）：在浏览器打开**不含 token 的**  
+   `https://relay.onetopway.com/kanban/setup/wecom`  
+   在表单里填写 board token（`AKB_TOKEN`）和 WeCom Secret → 写入 `$AKB_DATA_DIR/wecom.json`（0600，写一次锁定）→ 页面只显示 gettoken 的 `errcode`/`errmsg`，绝不回显 Secret。  
+   备选 B：在腾讯云网页终端 `read -rs S && printf 'AKB_WECOM_SECRET=%s\n' "$S" >> /etc/agent-kanban.env && unset S` 后重启看板。
+5. 确认 `curl -s -H "Authorization: Bearer $AKB_TOKEN" http://127.0.0.1:7311/kanban/api/tasks` 中 `"wecom_wired":true`；企微工作台打开应用应静默进看板。  
+   `journalctl -u agent-kanban` 不应出现 errcode 50001/60020；日志中不应出现 Secret / access_token / OAuth code。
 
 ## 5. 部署后安全检查
 
@@ -86,6 +121,7 @@ finished 报告写：看板网址 `https://relay.onetopway.com/kanban/`、部署
 ## 不要做的事
 
 - 不要停掉、重启或修改 relay、dashboard 及其配置/环境文件（只读取 relay 环境文件里的钥匙）。
-- 不要 restart Caddy，只用 reload；不要改除 relay.onetopway.com 以外的任何站点。
+- 不要 `systemctl restart caddy` / `systemctl reload caddy`（unit 无 ExecReload）；只用 `caddy reload --config ... --adapter caddyfile`。不要改除 relay.onetopway.com 以外的任何站点。
+- 不要把 WeCom Secret / `AKB_TOKEN` / `AKB_SESSION_SECRET` 写进聊天、PR、截图或进度报告。
 - 不要删除服务器上任何已有数据。
 - 不要再提交一次这个部署任务。
