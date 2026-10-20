@@ -1,8 +1,10 @@
 const SOURCE_COLORS = {
-  "claude-code": "#d97757", "claude-chat": "#c96442", codex: "#10a37f", chatgpt: "#0f8f6f",
-  cursor: "#3b3b3b", "cursor-cli": "#555", "cursor-cloud": "#6b5bd6", "grok-bot": "#111827", "grok-chat": "#374151",
+  "claude-code": "#d97757", "claude-code-web": "#b8613f", "claude-chat": "#c96442", codex: "#10a37f", chatgpt: "#0f8f6f",
+  cursor: "#3b3b3b", "cursor-cli": "#555", "cursor-cloud": "#6b5bd6", "grok-bot": "#5b6b82", "grok-chat": "#8391a7",
 };
-const STATUS_LABEL = { queued: "Queued", planning: "规划中", running: "Running", waiting: "等您", review: "审核中", done: "Done", failed: "Failed" };
+const STATUS_LABEL = { queued: "排队", planning: "规划中", running: "进行中", waiting: "等您", review: "审核中", done: "完成", failed: "失败" };
+// Finished columns show the newest few; the rest stay one click away.
+const FINISHED_LIMIT = 8;
 
 const params = new URLSearchParams(location.search);
 let token = params.get("token");
@@ -19,7 +21,7 @@ if (params.has("token")) {
 const withToken = (u) => (token ? `${u}${u.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}` : u);
 const inWxWork = /wxwork/i.test(navigator.userAgent || "");
 
-const state = { tasks: new Map(), columns: [], hidden: new Set(), query: "", flat: false, showStale: false, open: null };
+const state = { tasks: new Map(), columns: [], hidden: new Set(), query: "", flat: false, showStale: false, open: null, expanded: new Set() };
 const STALE_MS = 24 * 3600 * 1000;
 // A running/planning card with no event for this long is flagged on the board (still shown).
 const SILENT_MS = 30 * 60 * 1000;
@@ -40,10 +42,24 @@ function el(tag, attrs = {}, ...kids) {
 
 function ago(iso) {
   const s = Math.max(0, (Date.now() - Date.parse(iso)) / 1000);
-  if (s < 60) return `${Math.floor(s)}s`;
-  if (s < 3600) return `${Math.floor(s / 60)}m`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h`;
-  return `${Math.floor(s / 86400)}d`;
+  if (s < 60) return `${Math.floor(s)} 秒`;
+  if (s < 3600) return `${Math.floor(s / 60)} 分钟`;
+  if (s < 86400) return `${Math.floor(s / 3600)} 小时`;
+  return `${Math.floor(s / 86400)} 天`;
+}
+const since = (iso) => (Date.now() - Date.parse(iso) < 60000 ? "刚刚" : `${ago(iso)}前`);
+
+const ENTITIES = { lt: "<", gt: ">", amp: "&", quot: '"', "#39": "'", apos: "'" };
+// Older cloud-session cards were titled with the raw <wake>/<coordinator-relay> XML of the first
+// prompt. Show the person's own words instead (same rules as promptText in src/adapters/common.js).
+function displayTitle(t) {
+  const raw = t.title || "";
+  if (!/^\s*(<|&lt;)[a-z]/i.test(raw)) return raw;
+  const s = raw.replace(/&(lt|gt|amp|quot|#39|apos);/g, (_, e) => ENTITIES[e])
+    .replace(/<(system-reminder|system-note|session-context)\b[^>]*>[\s\S]*?<\/\1\b[^>]*>/gi, " ");
+  const m = /<cited\b[^>]*author="user"[^>]*>([^<]+)/i.exec(s) || /<message\b[^>]*from="human"[^>]*>([^<]+)/i.exec(s) || /<note>([^<]+)/i.exec(s);
+  const text = (m ? m[1] : s.replace(/<[^>]*>?/g, " ")).replace(/\s+/g, " ").trim();
+  return text || `${t.source} · ${t.cwd ? t.cwd.split("/").pop() : t.externalId}`;
 }
 
 const childrenOf = (key) => [...state.tasks.values()].filter((t) => t.parentKey === key).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
@@ -60,10 +76,11 @@ function descendants(key, out = []) {
 // Why a card is hidden by default: replaced by a newer task, or "in progress" with no word for a day
 // (e.g. a relay task Grok Bot never reported on). The relay still calls them open; we flag them.
 function staleReason(t) {
-  if (t.meta?.superseded_by) return "Superseded";
-  if (t.status !== "queued" && t.status !== "planning" && t.status !== "running") return null;
+  if (t.meta?.superseded_by) return "已被取代";
+  // review included: a session that just stopped talking (never resolved) should not sit in 审核中 forever.
+  if (!["queued", "planning", "running", "review"].includes(t.status)) return null;
   const last = lastHeard(t);
-  return Date.now() - Date.parse(last) > STALE_MS ? `No update for ${ago(last)}` : null;
+  return Date.now() - Date.parse(last) > STALE_MS ? `${ago(last)}无更新` : null;
 }
 
 // Newest update on the card or anything nested under it.
@@ -75,7 +92,7 @@ function lastHeard(t) {
 function silentReason(t) {
   if (t.status !== "planning" && t.status !== "running") return null;
   const last = lastHeard(t);
-  return Date.now() - Date.parse(last) > SILENT_MS ? `Silent ${ago(last)}` : null;
+  return Date.now() - Date.parse(last) > SILENT_MS ? `静默 ${ago(last)}` : null;
 }
 
 // Cards an agent opened itself through MCP move only when it remembers to report;
@@ -85,15 +102,18 @@ const selfReported = (t) => typeof t.createdBy === "string" && t.createdBy.start
 function matches(t) {
   if (state.hidden.has(t.source)) return false;
   if (!state.query) return true;
-  const hay = `${t.title} ${t.summary || ""} ${t.source} ${t.agentName || ""} ${t.cwd || ""} ${t.question || ""} ${t.background || ""}`.toLowerCase();
+  const hay = `${displayTitle(t)} ${t.summary || ""} ${t.source} ${t.agentName || ""} ${t.cwd || ""} ${t.question || ""} ${t.background || ""}`.toLowerCase();
   return hay.includes(state.query);
 }
 
 // "grok-bot · ops-bot" when the card names its bot; just the source otherwise.
 const who = (t) => (t.agentName ? `${t.source} · ${t.agentName}` : t.source);
 
-function badge(source, agentName) {
-  return el("span", { class: "badge", style: `--b:${SOURCE_COLORS[source] || "#64748b"}` }, agentName ? `${source} · ${agentName}` : source);
+const swatch = (source) => el("span", { class: "sw", style: `--s:${SOURCE_COLORS[source] || "#64748b"}` });
+
+function badge(source, agentName, kind) {
+  return el("span", { class: "who", title: [source, agentName, kind].filter(Boolean).join(" · ") },
+    swatch(source), source, agentName && el("span", { class: "agent" }, `· ${agentName}`), kind && el("span", { class: "agent" }, `· ${kind}`));
 }
 
 function tree(key, depth = 0) {
@@ -103,7 +123,7 @@ function tree(key, depth = 0) {
     el("li", {},
       el("div", { class: "row", title: c.summary || c.title, onclick: (e) => { e.stopPropagation(); openTask(c.key); } },
         el("span", { class: `sdot ${c.status}`, style: `--c:var(--${c.status})` }),
-        el("span", { class: "name" }, c.title),
+        el("span", { class: "name" }, displayTitle(c)),
         el("span", { class: "src", title: STATUS_LABEL[c.status] }, who(c))),
       tree(c.key, depth + 1))));
 }
@@ -124,7 +144,7 @@ async function pickChoice(t, value, btn) {
     }
   } catch (err) {
     if (btn) btn.disabled = false;
-    alert(`Could not record choice: ${err.message}`);
+    alert(`没能记录选择：${err.message}`);
   }
 }
 
@@ -159,26 +179,36 @@ function card(t, { showParent = false, hideTree = false } = {}) {
   const stale = staleReason(t);
   const silent = !stale && silentReason(t);
   const heard = lastHeard(t);
-  // In 等您, every waiting card is listed once; hide the nested tree so a waiting child is not shown twice.
+  const flags = [
+    stale && el("span", { class: "flag" }, stale),
+    silent && el("span", { class: "flag silent", title: "还标着进行中，但之后再没有任何上报。agent 可能已经停了却没说。" }, silent),
+    attention && el("span", { class: "flag" }, "子任务等您"),
+    selfReported(t) && el("span", { class: "flag self", title: "只在 agent 通过 MCP 主动上报时更新，不走 hook 或轮询" }, "自报"),
+    t.updateRequest && el("span", { class: "flag asked", title: "等 agent 写一段进展" }, "已请求更新"),
+    t.choice && el("span", { class: "flag chosen" }, "已选"),
+  ].filter(Boolean);
+  // In the needs-you lane every waiting card is listed once; hide the nested tree so a waiting child is not shown twice.
   const showTree = !hideTree && !state.flat;
-  return el("article", { class: `card${attention ? " attention" : ""}${stale ? " stale" : ""}${t.choice ? " chosen" : ""}`, style: `--c:var(--${t.status})`, onclick: () => openTask(t.key) },
-    el("div", { class: "top" }, badge(t.source, t.agentName), t.kind && el("span", {}, t.kind), stale && el("span", { class: "flag" }, stale), silent && el("span", { class: "flag silent", title: "Still marked in progress, but nothing has reported since. The agent may have stopped without saying so." }, silent), selfReported(t) && el("span", { class: "flag self", title: "Updated only when the agent reports through MCP, not by hooks or pollers" }, "self-reported"), t.updateRequest && el("span", { class: "flag asked", title: "Waiting for the agent to write a brief" }, "Update requested"), t.choice && el("span", { class: "flag chosen" }, "已选"), el("span", { class: "time", title: `Last heard ${new Date(heard).toLocaleString()}` }, `${ago(heard)} ago`)),
-    parent && el("div", { class: "last parent-line" }, `父卡：${parent.title}`),
-    el("div", { class: "title" }, t.title),
+  return el("article", { class: `card${attention ? " attention-child" : ""}${stale ? " stale" : ""}`, style: `--c:var(--${t.status})`, onclick: () => openTask(t.key) },
+    el("div", { class: "top" }, badge(t.source, t.agentName),
+      el("span", { class: "time", title: `最后上报 ${new Date(heard).toLocaleString()}` }, since(heard))),
+    parent && el("div", { class: "parent-line" }, `↳ ${displayTitle(parent)}`),
+    el("div", { class: "title" }, displayTitle(t)),
     t.summary && el("div", { class: "summary" }, t.summary),
     last && !(t.summary && same(last, t.summary)) && el("div", { class: "last", title: last }, last),
+    flags.length > 0 && el("div", { class: "flags" }, flags),
     choiceBlock(t, { compact: true }),
-    desc.length > 0 && !hideTree && el("div", { class: "rollup" }, Object.entries(counts).map(([s, n]) => el("span", { class: "pill", style: `--c:var(--${s})` }, `${n} ${STATUS_LABEL[s]}`))),
+    desc.length > 0 && !hideTree && el("div", { class: "rollup" }, Object.entries(counts).map(([st, n]) => el("span", { class: "pill", style: `--c:var(--${st})` }, `${n} ${STATUS_LABEL[st]}`))),
     showTree && tree(t.key));
 }
 
 function renderSources() {
   const sources = [...new Set([...state.tasks.values()].map((t) => t.source))].sort();
   $("sources").replaceChildren(...sources.map((s) =>
-    el("button", { class: "chip", "aria-pressed": String(!state.hidden.has(s)), onclick: () => { state.hidden.has(s) ? state.hidden.delete(s) : state.hidden.add(s); render(); } }, s)));
+    el("button", { class: "chip", "aria-pressed": String(!state.hidden.has(s)), title: state.hidden.has(s) ? "点击显示" : "点击隐藏", onclick: () => { state.hidden.has(s) ? state.hidden.delete(s) : state.hidden.add(s); render(); } }, swatch(s), s)));
 }
 
-// 等您 column aggregates every waiting card (including nested children); other columns keep roots only
+// The needs-you lane (等您) aggregates every waiting card (including nested children); other columns keep roots only
 // (or all cards when "Sub-tasks as cards" is on). Parent cards stay in their own status column.
 function cardsForColumn(colId, rootVisible) {
   if (colId !== "waiting") {
@@ -204,15 +234,33 @@ function render() {
   $("stale-count").textContent = staleCount;
   const visible = state.showStale ? candidates : candidates.filter((t) => !staleReason(t));
   visible.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-  $("board").replaceChildren(...state.columns.map((col) => {
+
+  const waiting = cardsForColumn("waiting", visible);
+  $("attention").hidden = waiting.length === 0;
+  $("attention").replaceChildren(
+    el("h2", {}, `等您处理 · ${waiting.length}`),
+    el("div", { class: "cards" }, waiting.map((t) => card(t, { showParent: Boolean(t.parentKey), hideTree: true }))));
+
+  const byStatus = {};
+  $("board").replaceChildren(...state.columns.filter((col) => col.id !== "waiting").map((col) => {
     const cards = cardsForColumn(col.id, visible);
-    return el("section", { class: "column" },
-      el("h2", {}, el("span", {}, el("span", { class: "dot", style: `background:var(--${col.id})` }), col.label), el("span", {}, cards.length)),
-      cards.length ? cards.map((t) => card(t, {
-        showParent: col.id === "waiting" && Boolean(t.parentKey),
-        hideTree: col.id === "waiting",
-      })) : el("div", { class: "empty" }, "—"));
+    byStatus[col.id] = cards.length;
+    const label = STATUS_LABEL[col.id] || col.label;
+    const finished = col.id === "done" || col.id === "failed";
+    const shown = finished && !state.expanded.has(col.id) ? cards.slice(0, FINISHED_LIMIT) : cards;
+    return el("section", { class: `column${cards.length ? "" : " empty"}`, style: `--c:var(--${col.id})`, title: cards.length ? null : `${label}：暂无` },
+      el("h2", {}, el("span", { class: "dot" }), label, el("span", { class: "n" }, cards.length)),
+      shown.map((t) => card(t)),
+      cards.length > shown.length && el("button", { class: "more", onclick: () => { state.expanded.add(col.id); render(); } }, `再显示 ${cards.length - shown.length} 张`));
   }));
+
+  const stat = (n, label, hot) => n > 0 && el("span", { class: hot ? "hot" : null }, el("b", {}, n), label);
+  $("stats").replaceChildren(...[
+    stat(waiting.length, "等您", true),
+    stat((byStatus.running || 0) + (byStatus.planning || 0) + (byStatus.queued || 0), "进行中"),
+    stat(byStatus.review || 0, "审核中"),
+    stat(byStatus.failed || 0, "失败"),
+  ].filter(Boolean));
   if (state.open) renderDetail();
 }
 
@@ -223,7 +271,7 @@ async function api(path, opts) {
       location.href = "auth/wecom/start";
       return new Promise(() => {});
     }
-    const t = prompt("Board token (AKB_TOKEN):");
+    const t = prompt("看板口令（AKB_TOKEN）：");
     if (t) {
       token = t;
       try { localStorage.setItem("akb-token", t); } catch {}
@@ -251,30 +299,35 @@ function renderDetail() {
   const t = state.tasks.get(state.open);
   if (!t) return void ($("drawer").hidden = true);
   const parent = t.parentKey && state.tasks.get(t.parentKey);
-  const meta = [["Status", STATUS_LABEL[t.status]], ["Source", t.source], ["Agent", t.agentName], ["Kind", t.kind], ["Key", t.key], ["Folder", t.cwd],
-    ["Started", t.startedAt && new Date(t.startedAt).toLocaleString()], ["Updated", new Date(t.updatedAt).toLocaleString()],
-    ...(t.choice ? [["Choice", `${t.choice.value} (${t.choice.source}, ${new Date(t.choice.at).toLocaleString()})`]] : []),
+  const meta = [["来源", t.source], ["Agent", t.agentName], ["类型", t.kind], ["Key", t.key], ["目录", t.cwd],
+    ["开始", t.startedAt && new Date(t.startedAt).toLocaleString()], ["更新", new Date(t.updatedAt).toLocaleString()],
+    ...(t.choice ? [["选择", `${t.choice.value}（${t.choice.source}，${new Date(t.choice.at).toLocaleString()}）`]] : []),
     ...Object.entries(t.meta || {}).filter(([, v]) => v != null && typeof v !== "object").map(([k, v]) => [k, String(v)])].filter(([, v]) => v);
-  const links = [...(t.url ? [{ url: t.url, label: "Open" }] : []), ...(t.links || [])];
+  const links = [...(t.url ? [{ url: t.url, label: "打开会话" }] : []), ...(t.links || [])];
+  const title = displayTitle(t);
   $("detail").replaceChildren(...[
-    el("div", {}, badge(t.source, t.agentName)),
-    el("h3", {}, t.title),
-    parent && el("div", { class: "last" }, "Part of ", el("a", { href: "#", onclick: (e) => { e.preventDefault(); openTask(parent.key); } }, parent.title)),
+    el("div", { class: "head" },
+      el("span", { class: "status-pill", style: `--c:var(--${t.status})` }, el("span", { class: "dot" }), STATUS_LABEL[t.status]),
+      badge(t.source, t.agentName, t.kind),
+      el("span", { title: new Date(lastHeard(t)).toLocaleString() }, `最后上报 ${since(lastHeard(t))}`)),
+    el("h3", { title: title !== t.title ? t.title : null }, title),
+    parent && el("div", { class: "parent-line" }, "属于 ", el("a", { href: "#", onclick: (e) => { e.preventDefault(); openTask(parent.key); } }, displayTitle(parent))),
     t.summary && el("p", {}, t.summary),
     choiceBlock(t),
     links.length > 0 && el("div", { class: "links" }, links.map((l) => el("a", { href: l.url, target: "_blank", rel: "noopener noreferrer" }, l.label || l.url))),
     el("div", { class: "meta" }, meta.flatMap(([k, v]) => [el("span", {}, k), el("span", {}, v)])),
-    childrenOf(t.key).length > 0 && el("section", {}, el("h4", {}, "Nested activity"), tree(t.key)),
-    el("section", {}, el("h4", {}, "Timeline"),
+    childrenOf(t.key).length > 0 && el("section", {}, el("h4", {}, "子任务"), tree(t.key)),
+    el("section", {}, el("h4", {}, "时间线"),
       el("ul", { class: "timeline" }, [...(t.events || [])].reverse().map((e) =>
-        el("li", {}, el("span", { class: "sdot", style: `--c:var(--${e.status || "queued"})`, title: e.status || "" }),
-          el("time", { title: e.at }, new Date(e.at).toLocaleTimeString()),
+        el("li", {}, el("span", { class: "sdot", style: `--c:var(--${e.status || "queued"})`, title: STATUS_LABEL[e.status] || "" }),
+          el("time", { title: new Date(e.at).toLocaleString() }, new Date(e.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })),
           el("span", {}, e.message || STATUS_LABEL[e.status] || ""))))),
-    updateControl(t),
-    el("button", { class: "danger", onclick: async () => {
-      if (!confirm("Remove this card and its nested activity from the board?")) return;
-      await api(`api/tasks/${encodeURIComponent(t.key)}`, { method: "DELETE" });
-    } }, "Remove from board"),
+    el("div", { class: "actions" },
+      updateControl(t),
+      el("button", { class: "danger", onclick: async () => {
+        if (!confirm("把这张卡和它的子任务从看板上移除？")) return;
+        await api(`api/tasks/${encodeURIComponent(t.key)}`, { method: "DELETE" });
+      } }, "从看板移除")),
   ].filter((n) => n instanceof Node));
 }
 
@@ -283,23 +336,23 @@ function renderDetail() {
 function updateControl(t) {
   if (t.status === "done" || t.status === "failed" || t.placeholder) return null;
   if (t.updateRequest) {
-    return el("div", { class: "asked-note" }, `Update requested ${ago(t.updateRequest.at)} ago. ${t.source} writes a brief here the next time it checks the board.`);
+    return el("div", { class: "asked-note" }, `${since(t.updateRequest.at)}请求了更新。${t.source} 下次连上看板时会在这里写一段进展。`);
   }
-  return el("button", { class: "action", title: "Ask the agent to write its latest brief into this card", onclick: async (e) => {
+  return el("button", { class: "action", title: "请 agent 把最新进展写进这张卡", onclick: async (e) => {
     e.target.disabled = true;
     try {
       await api(`api/tasks/${encodeURIComponent(t.key)}/update-request`, { method: "POST" });
     } catch (err) {
       e.target.disabled = false;
-      alert(`Could not request an update: ${err.message}`);
+      alert(`没能请求更新：${err.message}`);
     }
-  } }, "Get update");
+  } }, "请求更新");
 }
 
 function connect() {
   const es = new EventSource(withToken("api/stream"));
-  es.onopen = () => $("conn").classList.add("live");
-  es.onerror = () => $("conn").classList.remove("live");
+  es.onopen = () => { $("conn").classList.add("live"); $("conn").textContent = "实时"; };
+  es.onerror = () => { $("conn").classList.remove("live"); $("conn").textContent = "已断开，重连中…"; };
   es.addEventListener("task", (e) => {
     const t = JSON.parse(e.data);
     const prev = state.tasks.get(t.key);

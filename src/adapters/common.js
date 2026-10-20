@@ -6,6 +6,26 @@ export function oneLine(text, max = 120) {
   return s.length > max ? `${s.slice(0, max - 1)}…` : s;
 }
 
+const ENTITIES = { lt: "<", gt: ">", amp: "&", quot: '"', "#39": "'", apos: "'" };
+
+// The person's own words from a prompt. Claude project threads wrap every prompt in
+// <wake>/<coordinator-relay> XML (sometimes entity-escaped); a card titled with that is unreadable.
+// Plain prompts come back unchanged.
+export function promptText(prompt) {
+  if (typeof prompt !== "string") return "";
+  if (!/<\/?[a-z][\w-]*[\s>]|&lt;[a-z]/i.test(prompt)) return prompt;
+  const s = prompt
+    .replace(/&(lt|gt|amp|quot|#39|apos);/g, (_, e) => ENTITIES[e])
+    .replace(/<(system-reminder|system-note|session-context)\b[^>]*>[\s\S]*?<\/\1\b[^>]*>/gi, " ");
+  const pick = (re) => [...s.matchAll(re)].map((m) => m[1].replace(/<[^>]+>/g, " ").trim()).find(Boolean);
+  return pick(/<cited\b[^>]*author="user"[^>]*>([\s\S]*?)<\/cited>/gi)
+    || pick(/<message\b[^>]*trigger="true"[^>]*from="human"[^>]*>([\s\S]*?)<\/message>/gi)
+    || pick(/<message\b[^>]*from="human"[^>]*>([\s\S]*?)<\/message>/gi)
+    || pick(/<note>([\s\S]*?)<\/note>/gi)
+    || pick(/<message\b[^>]*>([\s\S]*?)<\/message>/gi)
+    || s.replace(/<[^>]+>/g, " ").trim();
+}
+
 export function folder(cwd) {
   return cwd ? path.basename(cwd) : "";
 }

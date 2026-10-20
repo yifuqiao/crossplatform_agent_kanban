@@ -1,23 +1,29 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Agent Kanban</title>
+  <title>Agent 看板</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <header class="bar">
-    <h1>Agent Kanban</h1>
-    <input id="search" type="search" placeholder="Search tasks…" aria-label="Search tasks">
-    <div id="sources" class="chips" role="group" aria-label="Filter by source"></div>
-    <label class="toggle"><input id="flat" type="checkbox"> Sub-tasks as cards</label>
-    <label class="toggle" title="Superseded tasks, and queued/planning/running tasks with no update for 24h. Running cards quiet for 30 minutes stay visible and are marked Silent."><input id="stale" type="checkbox"> Show stale (<span id="stale-count">0</span>)</label>
-    <span id="conn" class="conn" title="Live updates">●</span>
+    <div class="brand">
+      <h1>Agent 看板</h1>
+      <span id="conn" class="conn" title="实时更新">连接中…</span>
+    </div>
+    <div id="stats" class="stats" aria-live="polite"></div>
+    <div class="tools">
+      <input id="search" type="search" placeholder="搜索任务…" aria-label="搜索任务">
+      <div id="sources" class="chips" role="group" aria-label="按来源筛选"></div>
+      <label class="toggle"><input id="flat" type="checkbox"> 子任务平铺</label>
+      <label class="toggle" title="已被取代的卡，以及 24 小时没有动静的排队/规划/进行中/审核中卡。进行中但 30 分钟没动静的卡仍然显示，并标为“静默”。"><input id="stale" type="checkbox"> 显示过期（<span id="stale-count">0</span>）</label>
+    </div>
   </header>
+  <section id="attention" class="attention" hidden></section>
   <main id="board" class="board"></main>
   <aside id="drawer" class="drawer" hidden>
-    <button id="close" class="close" aria-label="Close">×</button>
+    <button id="close" class="close" aria-label="关闭">×</button>
     <div id="detail"></div>
   </aside>
   <script src="app.js" type="module"></script>
