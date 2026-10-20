@@ -92,7 +92,7 @@ function card(t) {
   const counts = {};
   for (const d of desc) counts[d.status] = (counts[d.status] || 0) + 1;
   const attention = t.status !== "waiting" && desc.some((d) => d.status === "waiting");
-  const last = t.events?.at(-1)?.message;
+  const last = t.events?.findLast((e) => e.type !== "update_request")?.message;
   const same = (a, b) => a.slice(0, 60) === b.slice(0, 60);
   const parent = state.flat && t.parentKey ? state.tasks.get(t.parentKey) : null;
   const stale = staleReason(t);
