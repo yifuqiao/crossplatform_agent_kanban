@@ -1,17 +1,11 @@
 # Serve the board at https://relay.onetopway.com/kanban/ inside the EXISTING relay site.
-# Do not create a second relay.onetopway.com block and do not change the relay's own proxy.
-# Add only the `handle /kanban*` block, and wrap the relay's existing proxy in a plain `handle`
-# so the two never both answer. Run `caddy validate` before reloading.
 #
-# The board itself strips /kanban (AKB_BASE_PATH=/kanban), so the path is passed through as is.
-relay.onetopway.com {
-    # ...keep any existing lines (bind, tls, headers) here unchanged...
+# Add ONLY the `handle /kanban*` block below, as the first block inside the existing
+# relay.onetopway.com { ... } site. Leave every existing line of that site exactly as it is.
+# Do not create a second relay.onetopway.com site. Do not touch any other site.
+# Requests outside /kanban never enter this block, so the relay keeps answering them as before.
+# The board strips /kanban itself (AKB_BASE_PATH=/kanban), so no URI rewriting is needed.
 
     handle /kanban* {
         reverse_proxy 127.0.0.1:7311
     }
-
-    handle {
-        reverse_proxy 127.0.0.1:8787
-    }
-}

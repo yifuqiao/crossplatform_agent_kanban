@@ -3,6 +3,19 @@
 目标：在已经运行 grok-bot-task-relay 的服务器上运行看板，用户通过 https://relay.onetopway.com/kanban/ 直接打开。
 用户已批准。按顺序做，做完一项再做下一项。不要把密钥写进回复、仓库、截图或进度报告。
 
+**最高要求：不能影响任何现有服务**（relay、dashboard、其他站点）。看板是新增的独立服务，
+除了第 4 步在 relay 站点里加一个 `/kanban` 块，不改动任何已有文件、服务或配置。
+拿不准时停下来报告，不要猜。
+
+## 0. 部署前记录基线
+
+- 记下这些结果，后面每一步都要对比，不一致就回滚并报告：
+  - `curl -s -o /dev/null -w '%{http_code}' https://relay.onetopway.com/health`
+  - `curl -s -o /dev/null -w '%{http_code}' https://relay.onetopway.com/mcp`（不带钥匙，应为 401）
+  - 服务器上其他已有站点首页的 HTTP 状态码
+  - `systemctl is-active grok-bot-task-relay`
+- 确认 7311 端口空闲：`ss -ltn | grep -w 7311` 应无输出；被占用就停下来报告，不要换端口或停掉占用者。
+
 ## 1. 拷贝代码
 
 - 用已有的 SSH 登录 relay 服务器，不要猜测新账号。
@@ -36,16 +49,19 @@ systemctl enable --now agent-kanban
 
 ## 4. HTTPS 网址：relay.onetopway.com/kanban
 
-- 看板挂在现有 relay 站点的 `/kanban` 路径下，不新建域名。环境文件里必须有 `AKB_BASE_PATH=/kanban`。
-- 在现有 `relay.onetopway.com` 的 Caddy 站点里，只按 `deploy/Caddyfile.snippet` 加 `handle /kanban*` 反代到 `127.0.0.1:7311`，并把 relay 原有的反代放进一个普通 `handle { }`。其他行保持不变，不要新建第二个同名站点。
-- 改之前先备份 Caddyfile，`caddy validate` 通过后再 reload。任何一步失败就恢复备份并报告。
-- 如果 relay 的 HTTPS 不是由这台机器上的 Caddy 终止（例如前面还有一层代理），不要改，在报告里写明实际的入口在哪里。
+先确认第 3 步全部通过，否则不做这一步。
+
+- 如果 relay 的 HTTPS 不是由这台机器上的 Caddy 终止（例如前面还有一层代理、或 Caddy 站点只 `bind 127.0.0.1`），不要改任何东西，在报告里写明实际的入口在哪里。
+- 备份：`cp /etc/caddy/Caddyfile /etc/caddy/Caddyfile.bak-agent-kanban-$(date +%Y%m%d%H%M%S)`（如果 Caddyfile 在别的位置，备份实际文件）。
+- 在现有 `relay.onetopway.com { ... }` 站点里，**只新增** `deploy/Caddyfile.snippet` 中的 `handle /kanban* { reverse_proxy 127.0.0.1:7311 }`，放在站点块内第一行。站点里原有的每一行都保持原样；不新建第二个同名站点；不改其他站点。
+- `caddy validate --config <Caddyfile> --adapter caddyfile` 通过后，再 `systemctl reload caddy`（用 reload，不要 restart）。validate 不通过就恢复备份，不 reload。
+- reload 后立刻对比第 0 步的基线。**任何一项和基线不同**：恢复备份、`systemctl reload caddy`、再次确认基线恢复，然后报告 failed。
 
 完成：
+- 第 0 步的基线全部不变；
 - `https://relay.onetopway.com/kanban/health` 返回 ok；
 - `https://relay.onetopway.com/kanban/api/tasks` 不带 token 返回 401；
-- `https://relay.onetopway.com/kanban` 跳转到 `/kanban/`；
-- relay 不受影响：`https://relay.onetopway.com/health` 仍正常，`/mcp` 不带钥匙仍返回 401；其他旧站点仍可访问。
+- `https://relay.onetopway.com/kanban` 跳转到 `/kanban/`。
 
 ## 报告
 
@@ -54,6 +70,7 @@ finished 报告写：看板网址 `https://relay.onetopway.com/kanban/`、部署
 
 ## 不要做的事
 
-- 不要停掉或重启 relay、dashboard。
+- 不要停掉、重启或修改 relay、dashboard 及其配置/环境文件（只读取 relay 环境文件里的钥匙）。
+- 不要 restart Caddy，只用 reload；不要改除 relay.onetopway.com 以外的任何站点。
 - 不要删除服务器上任何已有数据。
 - 不要再提交一次这个部署任务。
