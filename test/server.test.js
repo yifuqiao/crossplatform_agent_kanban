@@ -199,7 +199,8 @@ const WECOM_ENV = {
   AKB_WECOM_AGENT_ID: "1000030",
   AKB_WECOM_SECRET: "wecom-secret-VALUE",
   AKB_WECOM_USERS: "QiaoYiFu",
-  AKB_SESSION_SECRET: "session-secret-VALUE",
+  // ≥32 UTF-8 bytes required
+  AKB_SESSION_SECRET: "0123456789abcdef0123456789abcdef",
 };
 
 function wecomFetchStub({ userid = "QiaoYiFu", errcode = 0, noUserid = false } = {}) {
@@ -230,12 +231,13 @@ async function startOAuth(base) {
   return { state, stateCookie, loc, cookies };
 }
 
-test("unwired wecom: start 503, health.wecom_wired=false, token still works", async () => {
+test("unwired wecom: start 503, health has no wecom_wired, token still works", async () => {
   await withServer({ token: "t", basePath: "/kanban", env: {} }, async (base) => {
     assert.equal((await fetch(`${base}/kanban/auth/wecom/start`)).status, 503);
     const health = await (await fetch(`${base}/health`)).json();
-    assert.equal(health.wecom_wired, false);
-    assert.equal((await fetch(`${base}/kanban/api/tasks`, { headers: bearer("t") })).status, 200);
+    assert.equal("wecom_wired" in health, false);
+    const tasks = await (await fetch(`${base}/kanban/api/tasks`, { headers: bearer("t") })).json();
+    assert.equal(tasks.wecom_wired, false);
   });
 });
 
@@ -247,7 +249,7 @@ test("wecom OAuth: state missing/mismatch → 400; bad code → 502 without sess
     env: WECOM_ENV,
     fetchImpl,
   }, async (base) => {
-    assert.equal((await (await fetch(`${base}/health`)).json()).wecom_wired, true);
+    assert.equal((await (await fetch(`${base}/kanban/api/tasks`, { headers: bearer("t") })).json()).wecom_wired, true);
     const { state, stateCookie } = await startOAuth(base);
 
     const noState = await fetch(`${base}/kanban/auth/wecom/callback?code=c`, { redirect: "manual" });
@@ -407,7 +409,7 @@ test("wxwork UA on / redirects to OAuth start when wired and anonymous", async (
   });
 });
 
-test("setup/wecom requires token, locks after write, never echoes secret; logs scrub", async () => {
+test("setup/wecom: public GET, form token POST, locks after write, never echoes secret", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "akb-setup-"));
   const secret = "PASTE_SECRET_do_not_log";
   const code = "oauth-CODE-hidden";
@@ -429,16 +431,22 @@ test("setup/wecom requires token, locks after write, never echoes secret; logs s
       fetchImpl,
       dataDir: dir,
     }, async (base) => {
-      assert.equal((await fetch(`${base}/kanban/setup/wecom`)).status, 401);
-      const get = await fetch(`${base}/kanban/setup/wecom?token=setup-token`);
+      const get = await fetch(`${base}/kanban/setup/wecom`);
       assert.equal(get.status, 200);
       const getHtml = await get.text();
+      assert.match(getHtml, /name="token"/);
       assert.equal(getHtml.includes(secret), false);
 
-      const post = await fetch(`${base}/kanban/setup/wecom?token=setup-token`, {
+      assert.equal((await fetch(`${base}/kanban/setup/wecom`, {
         method: "POST",
         headers: { "content-type": "application/x-www-form-urlencoded" },
-        body: `secret=${encodeURIComponent(secret)}`,
+        body: `token=wrong&secret=${encodeURIComponent(secret)}`,
+      })).status, 401);
+
+      const post = await fetch(`${base}/kanban/setup/wecom`, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: `token=setup-token&secret=${encodeURIComponent(secret)}`,
       });
       assert.equal(post.status, 200);
       const postHtml = await post.text();
@@ -447,13 +455,13 @@ test("setup/wecom requires token, locks after write, never echoes secret; logs s
       assert.equal(JSON.parse(fs.readFileSync(path.join(dir, "wecom.json"), "utf8")).secret, secret);
       assert.equal(fs.statSync(path.join(dir, "wecom.json")).mode & 0o777, 0o600);
 
-      const again = await fetch(`${base}/kanban/setup/wecom?token=setup-token`, {
+      const again = await fetch(`${base}/kanban/setup/wecom`, {
         method: "POST",
         headers: { "content-type": "application/x-www-form-urlencoded" },
-        body: "secret=other",
+        body: "token=setup-token&secret=other",
       });
       assert.equal(again.status, 409);
-      assert.equal((await (await fetch(`${base}/health`)).json()).wecom_wired, true);
+      assert.equal((await (await fetch(`${base}/kanban/api/tasks`, { headers: bearer("setup-token") })).json()).wecom_wired, true);
     });
   } finally {
     console.log = origLog;
@@ -521,5 +529,56 @@ test("POST auth/logout clears session cookie", async () => {
     assert.ok(line);
     assert.match(line, /Max-Age=0/i);
     assert.equal((await fetch(`${base}/kanban/api/tasks`, { headers: { cookie: `${SESSION_COOKIE}=${encodeURIComponent(session)}` } })).status, 200);
+  });
+});
+
+test("session cookie rechecked every request: off-allowlist / empty users / unwired CorpID → 401", async () => {
+  const secret = WECOM_ENV.AKB_SESSION_SECRET;
+  const cookieFor = (uid) => ({ cookie: `${SESSION_COOKIE}=${encodeURIComponent(issueSession(secret, uid))}` });
+
+  // Signed cookie for uid not on allowlist
+  await withServer({
+    token: "t",
+    basePath: "/kanban",
+    env: WECOM_ENV,
+    fetchImpl: wecomFetchStub().fetchImpl,
+  }, async (base) => {
+    assert.equal((await fetch(`${base}/kanban/api/tasks`, { headers: cookieFor("Stranger") })).status, 401);
+    assert.equal((await fetch(`${base}/kanban/api/tasks`, { headers: cookieFor("QiaoYiFu") })).status, 200);
+  });
+
+  // Empty allowlist
+  await withServer({
+    token: "t",
+    basePath: "/kanban",
+    env: { ...WECOM_ENV, AKB_WECOM_USERS: "" },
+    fetchImpl: wecomFetchStub().fetchImpl,
+  }, async (base) => {
+    assert.equal((await fetch(`${base}/kanban/api/tasks`, { headers: cookieFor("QiaoYiFu") })).status, 401);
+  });
+
+  // WeCom unwired (CorpID removed) — cookie signature still valid
+  await withServer({
+    token: "t",
+    basePath: "/kanban",
+    env: { ...WECOM_ENV, AKB_WECOM_CORP_ID: "" },
+    fetchImpl: wecomFetchStub().fetchImpl,
+  }, async (base) => {
+    assert.equal((await fetch(`${base}/kanban/auth/wecom/start`)).status, 503);
+    assert.equal((await fetch(`${base}/kanban/api/tasks`, { headers: cookieFor("QiaoYiFu") })).status, 401);
+    assert.equal((await fetch(`${base}/kanban/api/tasks`, { headers: bearer("t") })).status, 200);
+  });
+});
+
+test("short AKB_SESSION_SECRET (<32 bytes) keeps wecom unwired", async () => {
+  await withServer({
+    token: "t",
+    basePath: "/kanban",
+    env: { ...WECOM_ENV, AKB_SESSION_SECRET: "too-short" },
+    fetchImpl: wecomFetchStub().fetchImpl,
+  }, async (base) => {
+    assert.equal((await fetch(`${base}/kanban/auth/wecom/start`)).status, 503);
+    const forged = issueSession("too-short", "QiaoYiFu");
+    assert.equal((await fetch(`${base}/kanban/api/tasks`, { headers: { cookie: `${SESSION_COOKIE}=${encodeURIComponent(forged)}` } })).status, 401);
   });
 });

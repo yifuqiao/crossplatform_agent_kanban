@@ -159,10 +159,11 @@ export class Store extends EventEmitter {
     if (kind && KNOWN_KINDS.has(kind)) task.kind = kind;
     const summary = cleanString(input.summary, 4000);
     if (summary) task.summary = summary;
-    for (const field of ["cwd", "url"]) {
-      const v = cleanString(input[field], 1000);
-      if (v) task[field] = v;
-    }
+    const cwd = cleanString(input.cwd, 1000);
+    if (cwd) task.cwd = cwd;
+    // Task url: http(s) only — reject javascript:, data:, etc.
+    const url = cleanString(input.url, 1000);
+    if (url && /^https?:\/\//i.test(url)) task.url = url;
     for (const link of cleanLinks(input.links)) {
       if (!task.links.some((l) => l.url === link.url)) task.links.push(link);
     }

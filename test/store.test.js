@@ -90,3 +90,15 @@ test("normalizes native statuses from each platform", () => {
   assert.equal(normalizeStatus("EXPIRED"), "failed");
   assert.equal(normalizeStatus("in progress"), "running");
 });
+
+test("task url accepts only http/https schemes", () => {
+  const s = new Store();
+  s.apply({ key: "u:1", status: "running", url: "javascript:alert(1)" });
+  assert.equal(s.get("u:1").url, null);
+  s.apply({ key: "u:1", url: "data:text/html,hi" });
+  assert.equal(s.get("u:1").url, null);
+  s.apply({ key: "u:1", url: "https://example.com/ok" });
+  assert.equal(s.get("u:1").url, "https://example.com/ok");
+  s.apply({ key: "u:1", url: "http://example.com/also" });
+  assert.equal(s.get("u:1").url, "http://example.com/also");
+});

@@ -110,10 +110,11 @@ function dataDirFromStore(store) {
 function setupWecomFormHtml({ locked, result } = {}) {
   const notice = locked
     ? `<p class="warn">Already configured (locked). Delete wecom.json on the server to re-enter.</p>`
-    : `<p>Paste the Agent Kanban (1000030) Secret once. It is written to disk and never shown again.</p>`;
+    : `<p>Open this page without putting the board token in the URL. Enter <code>AKB_TOKEN</code> and the Agent Kanban (1000030) Secret below. The secret is written once and never shown again.</p>`;
   const form = locked
     ? ""
     : `<form method="POST" action="">
+        <label>Board token (AKB_TOKEN) <input type="password" name="token" autocomplete="off" required></label>
         <label>WeCom Secret <input type="password" name="secret" autocomplete="off" required></label>
         <button type="submit">Save &amp; verify</button>
       </form>`;
@@ -188,11 +189,17 @@ export function createServer({
     return wecomClient;
   }
 
+  /**
+   * Session auth: valid HMAC cookie AND WeCom still wired AND uid still allowlisted.
+   * Re-checked on every request (revokes cookies if CorpID/users/secret wiring changes).
+   */
   function sessionOk(req) {
     const cfg = currentConfig();
-    if (!cfg.sessionSecret) return null;
+    if (!isWecomWired(cfg) || !cfg.users.length) return null;
     const cookies = parseCookies(req.headers.cookie);
-    return verifySession(cfg.sessionSecret, cookies[SESSION_COOKIE]);
+    const payload = verifySession(cfg.sessionSecret, cookies[SESSION_COOKIE]);
+    if (!payload || !cfg.users.includes(payload.uid)) return null;
+    return payload;
   }
 
   function authOk(req, url) {
@@ -221,7 +228,7 @@ export function createServer({
     }
     try {
       if (url.pathname === "/health") {
-        return send(res, 200, { ok: true, tasks: store.tasks.size, wecom_wired: wired() });
+        return send(res, 200, { ok: true, tasks: store.tasks.size });
       }
 
       // --- WeCom OAuth (no board auth required) ---
@@ -290,26 +297,40 @@ export function createServer({
         return res.end();
       }
 
-      // Setup page: AKB_TOKEN only (not session).
+      // Setup page: GET is public (enter token in the form). POST accepts token via form/JSON/Bearer/?token=.
       if (url.pathname === "/setup/wecom" && (req.method === "GET" || req.method === "POST")) {
-        if (!tokenOk(req, url, token)) return send(res, 401, { error: "unauthorized" });
         if (!dataDir) return send(res, 500, { error: "AKB_DATA_DIR not configured" });
         const locked = fs.existsSync(wecomSecretPath(dataDir));
         if (req.method === "GET") {
           return sendHtml(res, 200, setupWecomFormHtml({ locked }));
         }
-        if (locked) {
-          return sendHtml(res, 409, setupWecomFormHtml({ locked: true, result: { errcode: "locked", errmsg: "wecom.json already exists" } }));
-        }
         const raw = await readBody(req);
         const ct = req.headers["content-type"] || "";
         let secret = "";
+        let formToken = "";
         if (ct.includes("application/json")) {
           const body = parseJson(raw);
           secret = body?.secret != null ? String(body.secret) : "";
+          formToken = body?.token != null ? String(body.token) : "";
         } else {
           const params = new URLSearchParams(raw.toString("utf8"));
           secret = params.get("secret") || "";
+          formToken = params.get("token") || "";
+        }
+        // Prefer form/JSON token so the URL never needs ?token=.
+        const authed = formToken
+          ? (() => {
+              if (!token) return false;
+              const a = Buffer.from(formToken);
+              const b = Buffer.from(token);
+              return a.length === b.length && timingSafeEqual(a, b);
+            })()
+          : tokenOk(req, url, token);
+        if (!authed) {
+          return sendHtml(res, 401, setupWecomFormHtml({ locked, result: { errcode: "unauthorized", errmsg: "bad or missing board token" } }));
+        }
+        if (locked) {
+          return sendHtml(res, 409, setupWecomFormHtml({ locked: true, result: { errcode: "locked", errmsg: "wecom.json already exists" } }));
         }
         if (!secret.trim()) {
           return sendHtml(res, 400, setupWecomFormHtml({ locked: false, result: { errcode: "missing", errmsg: "secret required" } }));
@@ -398,7 +419,11 @@ export function createServer({
 
       if (url.pathname === "/api/tasks" && req.method === "GET") {
         const tasks = store.list({ status: url.searchParams.get("status") || undefined, source: url.searchParams.get("source") || undefined });
-        return send(res, 200, { columns: COLUMNS, tasks: tasks.map((t) => ({ ...publicTask(t), events: t.events.slice(-5) })) });
+        return send(res, 200, {
+          columns: COLUMNS,
+          tasks: tasks.map((t) => ({ ...publicTask(t), events: t.events.slice(-5) })),
+          wecom_wired: wired(),
+        });
       }
 
       const one = url.pathname.match(/^\/api\/tasks\/(.+)$/);
