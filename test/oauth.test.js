@@ -142,6 +142,7 @@ async function authorizePage(base, clientId, { challenge, redirect = REDIRECT, m
     setCookie: setCookies(res).find((l) => l.startsWith(`${OAUTH_CSRF_COOKIE}=`)) || "",
     xfo: res.headers.get("x-frame-options"),
     csp: res.headers.get("content-security-policy"),
+    referrerPolicy: res.headers.get("referrer-policy"),
   };
 }
 
@@ -1105,5 +1106,16 @@ test("client cap eviction skips a client that still has a live refresh token", {
     const next = await refresh(base, clientId, tok.body.refresh_token);
     assert.equal(next.status, 200, next.text.slice(0, 200));
     assert.equal((await mcp(base, next.body.access_token, "tools/list", {})).status, 200);
+  });
+});
+
+// With Referrer-Policy: no-referrer, browsers send `Origin: null` on the consent form POST,
+// which the origin check refuses ("Consent form was rejected.").
+test("consent page keeps the referrer same-origin so the form POST carries a real Origin", async () => {
+  await withOauth({}, async ({ base }) => {
+    const clientId = (await registerClient(base)).body.client_id;
+    const page = await authorizePage(base, clientId, { challenge: pkcePair().challenge });
+    assert.equal(page.status, 200);
+    assert.equal(page.referrerPolicy, "same-origin");
   });
 });
