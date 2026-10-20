@@ -88,6 +88,7 @@ test("project-thread prompts are titled with the person's words, not the wake XM
   assert.equal(promptText(relay), "我觉得UI整体来看都很糟糕。");
   assert.equal(promptText(`<coordinator-relay><relay><note>Add a close signal</note></relay></coordinator-relay>`), "Add a close signal");
   assert.equal(promptText("Fix the a < b comparison"), "Fix the a < b comparison");
+  assert.equal(promptText("Handle <message>hello</message> but keep Array<Foo>"), "Handle <message>hello</message> but keep Array<Foo>");
 
   const s = new Store();
   feed(s, claudeCodeEvents, [{ session_id: "w1", hook_event_name: "UserPromptSubmit", prompt: wake }]);
@@ -102,11 +103,16 @@ test("resolving a project thread closes the card and the following Stop keeps it
     { ...base, hook_event_name: "UserPromptSubmit", prompt: "close it" },
     { ...base, hook_event_name: "PreToolUse", tool_name: "mcp__hearthbot__set_thread_resolved", tool_input: { resolved: true } },
   ], env);
+  // PreToolUse alone (the call might still be denied or fail) does not close the card.
+  assert.equal(s.get("claude-code-web:session_abc").status, "running");
+  feed(s, claudeCodeEvents, [
+    { ...base, hook_event_name: "PostToolUse", tool_name: "mcp__hearthbot__set_thread_resolved", tool_input: { resolved: true } },
+  ], env);
   const key = "claude-code-web:session_abc";
   assert.equal(s.get(key).status, "done");
   feed(s, claudeCodeEvents, [{ ...base, hook_event_name: "Stop" }], env);
   assert.equal(s.get(key).status, "done");
-  feed(s, claudeCodeEvents, [{ ...base, hook_event_name: "PreToolUse", tool_name: "mcp__hearthbot__set_thread_resolved", tool_input: { resolved: false } }], env);
+  feed(s, claudeCodeEvents, [{ ...base, hook_event_name: "PostToolUse", tool_name: "mcp__hearthbot__set_thread_resolved", tool_input: { resolved: false } }], env);
   assert.equal(s.get(key).status, "running");
   feed(s, claudeCodeEvents, [{ ...base, hook_event_name: "Stop" }], env);
   assert.equal(s.get(key).status, "review");

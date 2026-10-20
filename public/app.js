@@ -54,7 +54,7 @@ const ENTITIES = { lt: "<", gt: ">", amp: "&", quot: '"', "#39": "'", apos: "'" 
 // prompt. Show the person's own words instead (same rules as promptText in src/adapters/common.js).
 function displayTitle(t) {
   const raw = t.title || "";
-  if (!/^\s*(<|&lt;)[a-z]/i.test(raw)) return raw;
+  if (!/^\s*(<|&lt;)(wake|coordinator-relay|system-reminder)\b/i.test(raw)) return raw;
   const s = raw.replace(/&(lt|gt|amp|quot|#39|apos);/g, (_, e) => ENTITIES[e])
     .replace(/<(system-reminder|system-note|session-context)\b[^>]*>[\s\S]*?<\/\1\b[^>]*>/gi, " ");
   const m = /<cited\b[^>]*author="user"[^>]*>([^<]+)/i.exec(s) || /<message\b[^>]*from="human"[^>]*>([^<]+)/i.exec(s) || /<note>([^<]+)/i.exec(s);

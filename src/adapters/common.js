@@ -13,7 +13,8 @@ const ENTITIES = { lt: "<", gt: ">", amp: "&", quot: '"', "#39": "'", apos: "'" 
 // Plain prompts come back unchanged.
 export function promptText(prompt) {
   if (typeof prompt !== "string") return "";
-  if (!/<\/?[a-z][\w-]*[\s>]|&lt;[a-z]/i.test(prompt)) return prompt;
+  // Only the known envelopes: a coding prompt that merely mentions <tags> or Array<Foo> stays as typed.
+  if (!/^\s*(<|&lt;)(wake|coordinator-relay|system-reminder)\b/i.test(prompt)) return prompt;
   const s = prompt
     .replace(/&(lt|gt|amp|quot|#39|apos);/g, (_, e) => ENTITIES[e])
     .replace(/<(system-reminder|system-note|session-context)\b[^>]*>[\s\S]*?<\/\1\b[^>]*>/gi, " ");

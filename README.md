@@ -56,7 +56,7 @@ MCP 地址是 `https://relay.onetopway.com/kanban/mcp`，Cursor webhook 是 `htt
 | `SessionStart` | 新卡片，标题 `Claude Code · <目录>` |
 | `UserPromptSubmit` | → Running；第一句 prompt 成为标题 |
 | `PreToolUse` | 时间线记一笔；`Task`/`Agent` 工具 → **新的子卡（subagent）** |
-| `PostToolUse` (`Task\|Agent`) | 子卡 → Done，附 subagent 结果 |
+| `PostToolUse` (`Task\|Agent\|mcp__.*__set_thread_resolved`) | 子卡 → Done，附 subagent 结果；项目线程关闭成功后会话卡 → Done |
 | `Notification` | → Needs you（要权限 / 空闲等你） |
 | `Stop` | → Review（这一轮做完了） |
 | `SessionEnd` | → Done |

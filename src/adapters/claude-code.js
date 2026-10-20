@@ -51,11 +51,6 @@ export function claudeCodeEvents(payload, env = process.env) {
           message: oneLine(input.prompt, 600),
           type: "subagent",
         });
-      } else if (/(^|__)set_thread_resolved$/.test(payload.tool_name || "") && typeof payload.tool_input?.resolved === "boolean") {
-        // Resolving a Claude project thread is the only "I'm finished" signal a cloud session gives;
-        // the session itself never ends, so without this the card sits in 审核中 forever.
-        const resolved = payload.tool_input.resolved;
-        events.push({ ...base, status: resolved ? "done" : "running", message: resolved ? "Thread resolved" : "Thread reopened", type: "resolve" });
       } else {
         events.push({ ...base, status: "running", message: `${payload.tool_name}${toolHint(payload.tool_input)}`, type: "tool" });
       }
@@ -71,6 +66,12 @@ export function claudeCodeEvents(payload, env = process.env) {
           message: "Subagent finished",
           type: "subagent",
         });
+      } else if (/(^|__)set_thread_resolved$/.test(payload.tool_name || "") && typeof payload.tool_input?.resolved === "boolean") {
+        // Resolving a Claude project thread is the only "I'm finished" signal a cloud session gives;
+        // the session itself never ends, so without this the card sits in 审核中 forever.
+        // PostToolUse, not PreToolUse: it only fires once the call succeeded.
+        const resolved = payload.tool_input.resolved;
+        events.push({ ...base, status: resolved ? "done" : "running", message: resolved ? "Thread resolved" : "Thread reopened", type: "resolve" });
       }
       break;
     case "Notification":
