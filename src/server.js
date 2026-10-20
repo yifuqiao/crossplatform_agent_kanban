@@ -489,18 +489,32 @@ export function createServer({
         for (const ev of events) {
           try {
             // choice_resolved via events is always chat; never honor a forged source:"board".
+            // choice_by is server-set — ignore any caller-provided value.
             const event = ev && typeof ev === "object" && ev.choice_resolved && typeof ev.choice_resolved === "object"
               ? {
                   ...ev,
                   choice_resolved: { value: ev.choice_resolved.value },
-                  choice_by: ev.choice_by || ev.agent_name || "events",
+                  choice_by: "events",
                 }
               : ev;
-            const { task } = store.apply(event);
-            results.push({ ok: true, key: task.key, status: task.status });
+            const { task, choice_rejected } = store.apply(event);
+            if (choice_rejected) {
+              results.push({
+                ok: false,
+                key: task.key,
+                status: task.status,
+                error: choice_rejected.reason,
+                choice_rejected,
+              });
+            } else {
+              results.push({ ok: true, key: task.key, status: task.status });
+            }
           } catch (err) {
             results.push({ ok: false, error: err.message });
           }
+        }
+        if (!Array.isArray(body) && results[0]?.choice_rejected) {
+          return send(res, results[0].choice_rejected.status, results[0]);
         }
         const status = results.every((r) => r.ok) ? 200 : results.some((r) => r.ok) ? 207 : 400;
         return send(res, status, Array.isArray(body) ? { results } : results[0]);

@@ -66,10 +66,13 @@ function cleanOptions(options) {
     .slice(0, 12);
 }
 
-function optionsEqual(a, b) {
+// Same option values (order/labels ignored) — reorder alone is not a new round.
+function optionsSameValues(a, b) {
   if (!a && !b) return true;
   if (!a || !b || a.length !== b.length) return false;
-  return a.every((o, i) => o.label === b[i].label && o.value === b[i].value);
+  const av = a.map((o) => o.value).sort();
+  const bv = b.map((o) => o.value).sort();
+  return av.every((v, i) => v === bv[i]);
 }
 
 // Same validation for board clicks and chat choice_resolved (except source, which callers force).
@@ -223,13 +226,14 @@ export class Store extends EventEmitter {
     }
 
     // Optional needs-you prompt fields (all omitable; old cards stay unchanged).
-    // A new question/options round clears the live choice (prior pick stays on the timeline).
+    // A new question or a different set of option values clears the live choice (prior pick stays on the timeline).
+    // Reordering the same values (or relabeling) alone does not.
     const options = cleanOptions(input.options);
     const question = cleanString(input.question, 500);
     let newRound = false;
-    if (options && !optionsEqual(task.options, options)) {
+    if (options) {
+      if (!optionsSameValues(task.options, options)) newRound = true;
       task.options = options;
-      newRound = true;
     }
     if (question && question !== task.question) {
       task.question = question;
@@ -247,24 +251,6 @@ export class Store extends EventEmitter {
       });
       if (task.events.length > MAX_EVENTS) task.events.splice(0, task.events.length - MAX_EVENTS);
       task.choice = null;
-    }
-
-    // Chat / /api/events resolution only. Source is always "chat" — never trust client source:"board".
-    if (input.choice_resolved && typeof input.choice_resolved === "object") {
-      const check = validateChoice(task, input.choice_resolved.value);
-      if (check.ok && !check.idempotent) {
-        const by = cleanString(input.choice_by, 80) || null;
-        task.choice = { value: check.cleaned, at: now, source: "chat", by };
-        task.events.push({
-          id: randomUUID(),
-          at: now,
-          status: null,
-          message: `Chose “${check.cleaned}” (chat${by ? ` · ${by}` : ""})`,
-          type: "choice",
-        });
-        if (task.events.length > MAX_EVENTS) task.events.splice(0, task.events.length - MAX_EVENTS);
-      }
-      // Invalid / conflict / idempotent: leave card as-is (MCP surfaces current choice).
     }
 
     const parent = parseRef(input.parent);
@@ -292,6 +278,28 @@ export class Store extends EventEmitter {
       task.startedAt = now;
     }
 
+    // Chat / /api/events resolution only — after status/options so running→waiting+choice works.
+    // Source is always "chat"; never trust client source:"board".
+    let choice_rejected;
+    if (input.choice_resolved && typeof input.choice_resolved === "object") {
+      const check = validateChoice(task, input.choice_resolved.value);
+      if (check.ok && !check.idempotent) {
+        const by = cleanString(input.choice_by, 80) || null;
+        task.choice = { value: check.cleaned, at: now, source: "chat", by };
+        task.events.push({
+          id: randomUUID(),
+          at: now,
+          status: null,
+          message: `Chose “${check.cleaned}” (chat${by ? ` · ${by}` : ""})`,
+          type: "choice",
+        });
+        if (task.events.length > MAX_EVENTS) task.events.splice(0, task.events.length - MAX_EVENTS);
+      } else if (!check.ok) {
+        choice_rejected = { reason: check.error, status: check.status };
+      }
+      // Idempotent same value: success, no rejection.
+    }
+
     // A brief with no note of its own still goes on the timeline.
     const message = cleanString(input.message, 2000) || (input.brief && pendingRequest && summary ? summary.slice(0, 2000) : undefined);
     if (message || statusChanged) {
@@ -314,7 +322,7 @@ export class Store extends EventEmitter {
 
     this.scheduleSave();
     for (const t of new Set([task, ...changed])) this.emit("change", t);
-    return { task, changed: true };
+    return { task, changed: true, choice_rejected };
   }
 
   // The board only records the ask; the agent picks it up through MCP (kanban_report /

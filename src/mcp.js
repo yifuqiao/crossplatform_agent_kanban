@@ -178,18 +178,20 @@ function callTool(store, name, args = {}, principal = ADMIN) {
     const choiceResolved = args.choice_resolved && typeof args.choice_resolved === "object"
       ? { value: args.choice_resolved.value } // drop any client "source"; store forces chat
       : undefined;
-    const { task } = store.apply({
+    const { task, choice_rejected } = store.apply({
       key, title: args.title, status: args.status, message: args.note, summary: args.summary,
       parent: args.parent_key, links: args.links, kind: existing || !principal.admin ? undefined : "chat", agent_name: as.agentName,
       created_by: existing ? undefined : ownerOf(principal), brief: Boolean(args.summary), type: args.summary ? "brief" : undefined,
       question: args.question, background: args.background, options: args.options,
       choice_resolved: choiceResolved, choice_by: choiceResolved ? choiceByOf(principal) : undefined,
     });
-    return {
+    const out = {
       task_key: task.key, status: task.status, title: task.title, source: task.source, agent_name: task.agentName || null,
       choice: task.choice || null,
       update_requests: updateRequests(store, principal, task.source),
     };
+    if (choice_rejected) out.choice_rejected = choice_rejected;
+    return out;
   }
   if (name === "kanban_update_requests") {
     return { update_requests: updateRequests(store, principal, args.source) };
@@ -244,7 +246,12 @@ export function handleMcp(store, msg, principal = ADMIN) {
     case "tools/call":
       try {
         const result = callTool(store, msg.params?.name, msg.params?.arguments || {}, principal);
-        return reply({ content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result, isError: false });
+        // choice_resolved rejection still updates other fields, but surfaces as a tool error with reason.
+        const rejected = result?.choice_rejected;
+        const text = rejected
+          ? rejected.reason
+          : JSON.stringify(result);
+        return reply({ content: [{ type: "text", text }], structuredContent: result, isError: Boolean(rejected) });
       } catch (err) {
         if (!(err instanceof ToolError)) console.error(`[akb] mcp ${msg.params?.name}: ${err.stack || err}`);
         return reply({ content: [{ type: "text", text: err instanceof ToolError ? err.message : "Internal error" }], isError: true });
