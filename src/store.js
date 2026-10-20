@@ -197,14 +197,21 @@ export class Store extends EventEmitter {
       task.status = status;
       if (status === "running" && !task.startedAt) task.startedAt = now;
       task.endedAt = TERMINAL.has(status) ? now : null;
+      if (TERMINAL.has(status)) task.updateRequest = null;
     } else if (status === "running" && !task.startedAt) {
       task.startedAt = now;
     }
 
-    const message = cleanString(input.message, 2000);
+    // A brief with no note of its own still goes on the timeline.
+    const message = cleanString(input.message, 2000) || (input.brief && task.updateRequest && summary ? summary.slice(0, 2000) : undefined);
     if (message || statusChanged) {
       task.events.push({ id: eventId || randomUUID(), at: now, status: status || null, message: message || null, type: cleanString(input.type, 40) || null });
       if (task.events.length > MAX_EVENTS) task.events.splice(0, task.events.length - MAX_EVENTS);
+    }
+    // A brief written by the agent answers an open "Get update" request.
+    if (input.brief && task.updateRequest && summary) {
+      task.updateRequest = null;
+      task.briefAt = now;
     }
     if (eventId) {
       task.seen.add(eventId);
@@ -218,6 +225,25 @@ export class Store extends EventEmitter {
     this.scheduleSave();
     for (const t of new Set([task, ...changed])) this.emit("change", t);
     return { task, changed: true };
+  }
+
+  // The board only records the ask; the agent picks it up through MCP (kanban_report /
+  // kanban_update_requests) and answers with a brief. Nothing is sent to the agent or the relay.
+  requestUpdate(key, { by } = {}) {
+    const task = this.tasks.get(key);
+    if (!task) return null;
+    if (task.updateRequest) return task;
+    const at = new Date().toISOString();
+    task.updateRequest = { at, by: cleanString(by, 80) || null };
+    task.events.push({ id: randomUUID(), at, status: null, message: "Update requested from the board", type: "update_request" });
+    if (task.events.length > MAX_EVENTS) task.events.splice(0, task.events.length - MAX_EVENTS);
+    this.scheduleSave();
+    this.emit("change", task);
+    return task;
+  }
+
+  updateRequests({ source } = {}) {
+    return this.list({ source }).filter((t) => t.updateRequest).sort((a, b) => a.updateRequest.at.localeCompare(b.updateRequest.at));
   }
 
   // Recompute placeholder ancestors from their children. Returns the tasks that changed.

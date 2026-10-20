@@ -84,7 +84,7 @@ test("MCP: initialize, list tools, report and list a chat task", async () => {
     assert.equal(init.result.serverInfo.name, "agent-kanban");
     assert.equal((await fetch(`${base}/mcp`, json({ jsonrpc: "2.0", method: "notifications/initialized" }, bearer("test-token")))).status, 202);
     const tools = await rpc("tools/list", {});
-    assert.deepEqual(tools.result.tools.map((t) => t.name), ["kanban_report", "kanban_list", "kanban_get"]);
+    assert.deepEqual(tools.result.tools.map((t) => t.name), ["kanban_report", "kanban_list", "kanban_update_requests", "kanban_get"]);
 
     const created = await rpc("tools/call", { name: "kanban_report", arguments: { title: "Plan Q4 launch", status: "running", source: "claude-chat" } });
     const key = created.result.structuredContent.task_key;
@@ -614,4 +614,36 @@ test("POST /api/grok/status-check validates keys and calls the relay poller", as
     bare.closeAllConnections?.();
     await new Promise((r) => bare.close(r));
   }
+});
+
+test("Get update: the board records the ask, the agent reads it over MCP and answers with a brief", async () => {
+  await withServer({ token: "test-token" }, async (base, store) => {
+    const rpc = async (name, args) => (await (await fetch(`${base}/mcp`, json({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }, bearer("test-token")))).json()).result.structuredContent;
+    const ask = (key, headers = bearer("test-token")) => fetch(`${base}/api/tasks/${encodeURIComponent(key)}/update-request`, { method: "POST", headers });
+    const { task_key: key } = await rpc("kanban_report", { title: "富创 WAIT 抢救", status: "running", source: "grok-bot" });
+
+    assert.equal((await ask(key, {})).status, 401);
+    assert.equal((await ask("grok-bot:nope")).status, 404);
+    const res = await ask(key);
+    assert.equal(res.status, 200);
+    assert.ok((await res.json()).updateRequest.at);
+    assert.equal((await ask(key)).status, 200, "asking twice is harmless");
+    assert.equal(store.get(key).events.filter((e) => e.type === "update_request").length, 1);
+
+    assert.deepEqual((await rpc("kanban_update_requests", { source: "claude-chat" })).update_requests, []);
+    assert.equal((await rpc("kanban_update_requests", { source: "grok-bot" })).update_requests[0].task_key, key);
+    // A status-only report does not answer it, and the result tells the agent it is still owed.
+    const ping = await rpc("kanban_report", { task_key: key, status: "running", note: "第5波" });
+    assert.equal(ping.update_requests[0].task_key, key);
+
+    const done = await rpc("kanban_report", { task_key: key, status: "running", summary: "released 140 / failed 190 / pending 1780" });
+    assert.deepEqual(done.update_requests, []);
+    const task = store.get(key);
+    assert.equal(task.updateRequest, null);
+    assert.equal(task.summary, "released 140 / failed 190 / pending 1780");
+    assert.equal(task.events.at(-1).message, "released 140 / failed 190 / pending 1780");
+
+    store.apply({ key, status: "done" });
+    assert.equal((await ask(key)).status, 409);
+  });
 });

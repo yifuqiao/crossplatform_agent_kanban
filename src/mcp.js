@@ -9,7 +9,7 @@ const TOOLS = [
     name: "kanban_report",
     title: "Report a task to the agent kanban",
     description:
-      "Create or update a card on the user's cross-platform agent kanban. Call it when you start a task the user asked for (status running), when you are blocked on the user (waiting), when you hand back a result to check (review), and when it is done or failed. Omit task_key to create a new card; pass the returned task_key on later calls. Pass parent_key when this work was spun up by another task on the board.",
+      "Create or update a card on the user's cross-platform agent kanban. Call it when you start a task the user asked for (status running), when you are blocked on the user (waiting), when you hand back a result to check (review), and when it is done or failed. Omit task_key to create a new card; pass the returned task_key on later calls. Pass parent_key when this work was spun up by another task on the board. The result lists update_requests: cards of your source where the user pressed Get update; answer each with a kanban_report carrying a short summary brief.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -19,7 +19,7 @@ const TOOLS = [
         title: { type: "string", maxLength: 300 },
         status: { type: "string", enum: STATUSES },
         note: { type: "string", maxLength: 2000, description: "One timeline line describing what just happened." },
-        summary: { type: "string", maxLength: 4000, description: "Current overall state or final result." },
+        summary: { type: "string", maxLength: 4000, description: "Current overall state or final result. A summary answers an open update request on this card." },
         source: { type: "string", maxLength: 60, description: "Your platform, e.g. claude-chat, chatgpt, grok-chat, grok-bot. Used when creating." },
         parent_key: { type: "string", description: "task_key of the card that spun this work up." },
         links: { type: "array", maxItems: 20, items: { type: "object", required: ["url"], properties: { url: { type: "string" }, label: { type: "string" } } } },
@@ -39,6 +39,18 @@ const TOOLS = [
     annotations: { readOnlyHint: true },
   },
   {
+    name: "kanban_update_requests",
+    title: "List cards waiting for an update brief",
+    description:
+      "List cards where the user pressed Get update and is waiting for a brief. For each one you own, call kanban_report with its task_key, a summary (the latest state in a few lines: progress, numbers, blockers, next step) and a note. That clears the request.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: { source: { type: "string", maxLength: 60, description: "Only cards from this source, e.g. grok-bot." } },
+    },
+    annotations: { readOnlyHint: true },
+  },
+  {
     name: "kanban_get",
     title: "Read one kanban task",
     description: "Read one card with its timeline and nested sub-tasks.",
@@ -48,7 +60,14 @@ const TOOLS = [
 ];
 
 function brief(t, store) {
-  return { task_key: t.key, title: t.title, status: t.status, source: t.source, summary: t.summary, updatedAt: t.updatedAt, children: store.children(t.key).length };
+  return {
+    task_key: t.key, title: t.title, status: t.status, source: t.source, summary: t.summary, updatedAt: t.updatedAt,
+    children: store.children(t.key).length, update_requested_at: t.updateRequest?.at,
+  };
+}
+
+function updateRequests(store, source) {
+  return store.updateRequests({ source }).map((t) => ({ task_key: t.key, title: t.title, status: t.status, requested_at: t.updateRequest.at }));
 }
 
 function callTool(store, name, args = {}) {
@@ -61,9 +80,12 @@ function callTool(store, name, args = {}) {
     }
     const { task } = store.apply({
       key, title: args.title, status: args.status, message: args.note, summary: args.summary,
-      parent: args.parent_key, links: args.links, kind: store.get(key) ? undefined : "chat",
+      parent: args.parent_key, links: args.links, kind: store.get(key) ? undefined : "chat", brief: Boolean(args.summary), type: args.summary ? "brief" : undefined,
     });
-    return { task_key: task.key, status: task.status, title: task.title };
+    return { task_key: task.key, status: task.status, title: task.title, update_requests: updateRequests(store, task.source) };
+  }
+  if (name === "kanban_update_requests") {
+    return { update_requests: updateRequests(store, args.source) };
   }
   if (name === "kanban_list") {
     const tasks = store.list({ status: args.status, root: true }).slice(0, args.limit || 25);
@@ -90,7 +112,7 @@ export function handleMcp(store, msg) {
         protocolVersion: msg.params?.protocolVersion || "2025-06-18",
         capabilities: { tools: { listChanged: false } },
         serverInfo: { name: "agent-kanban", version: "0.1.0" },
-        instructions: "Report every task you start for the user with kanban_report, and update it when its status changes, so the user can follow all agent work on one board.",
+        instructions: "Report every task you start for the user with kanban_report, and update it when its status changes, so the user can follow all agent work on one board. When a result lists update_requests (the user pressed Get update on a card), answer each card you own with kanban_report: a short summary brief of where it stands now.",
       });
     case "ping":
       return reply({});

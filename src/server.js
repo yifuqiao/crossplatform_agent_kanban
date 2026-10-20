@@ -4,7 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { timingSafeEqual } from "node:crypto";
 import { Store, publicTask } from "./store.js";
-import { COLUMNS } from "./status.js";
+import { COLUMNS, TERMINAL } from "./status.js";
 import { handleMcp } from "./mcp.js";
 import { cursorAgentEvent, verifyCursorWebhook, createCursorCloudPoller } from "./pollers/cursor-cloud.js";
 import { createGrokRelayPoller, MAX_STATUS_CHECK } from "./pollers/grok-relay.js";
@@ -427,6 +427,19 @@ export function createServer({
           tasks: tasks.map((t) => ({ ...publicTask(t), events: t.events.slice(-5) })),
           wecom_wired: wired(),
         });
+      }
+
+      // Get update: record the ask on the card. Agents read it through MCP and answer with a brief;
+      // the board itself never contacts the agent or the relay.
+      const ask = url.pathname.match(/^\/api\/tasks\/([^/]+)\/update-request$/);
+      if (ask) {
+        if (req.method !== "POST") return send(res, 405, { error: "method not allowed" }, { allow: "POST" });
+        const key = decodeURIComponent(ask[1]);
+        const task = store.get(key);
+        if (!task) return send(res, 404, { error: "not found" });
+        if (TERMINAL.has(task.status)) return send(res, 409, { error: `task is ${task.status}` });
+        store.requestUpdate(key, { by: sessionOk(req)?.uid });
+        return send(res, 200, { ok: true, updateRequest: task.updateRequest });
       }
 
       const one = url.pathname.match(/^\/api\/tasks\/(.+)$/);

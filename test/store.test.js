@@ -113,3 +113,18 @@ test("a late-arriving older status does not overwrite a newer one", () => {
   s.apply({ key: "claude-code:s", status: "running", at: "2026-10-20T09:00:03Z" });
   assert.equal(s.get("claude-code:s").status, "running");
 });
+
+test("update requests: polled summaries do not answer them, a brief or a terminal status does", () => {
+  const s = new Store();
+  s.apply({ key: "grok-bot:r1", status: "running", title: "Long job" });
+  s.requestUpdate("grok-bot:r1", { by: "yifu" });
+  assert.equal(s.get("grok-bot:r1").updateRequest.by, "yifu");
+  s.apply({ key: "grok-bot:r1", summary: "relay snapshot" });
+  assert.ok(s.get("grok-bot:r1").updateRequest);
+  s.apply({ key: "grok-bot:r1", summary: "fresh brief", brief: true });
+  assert.equal(s.get("grok-bot:r1").updateRequest, null);
+  s.requestUpdate("grok-bot:r1");
+  s.apply({ key: "grok-bot:r1", status: "failed" });
+  assert.equal(s.get("grok-bot:r1").updateRequest, null);
+  assert.equal(s.requestUpdate("grok-bot:missing"), null);
+});
