@@ -217,7 +217,13 @@ function callTool(store, name, args = {}, principal = ADMIN) {
       background: task.background || null,
       options: task.options || null,
       choice: task.choice
-        ? { value: task.choice.value, at: task.choice.at, source: task.choice.source, by: task.choice.by || null }
+        ? {
+            value: task.choice.value,
+            label: task.choice.label || null,
+            at: task.choice.at,
+            source: task.choice.source,
+            by: task.choice.by || null,
+          }
         : null,
     };
   }
@@ -247,9 +253,10 @@ export function handleMcp(store, msg, principal = ADMIN) {
       try {
         const result = callTool(store, msg.params?.name, msg.params?.arguments || {}, principal);
         // choice_resolved rejection still updates other fields, but surfaces as a tool error with reason.
+        // Include task_key so clients can retry without creating a duplicate card.
         const rejected = result?.choice_rejected;
         const text = rejected
-          ? rejected.reason
+          ? `${result.task_key} 已更新，选择被拒：${rejected.reason}`
           : JSON.stringify(result);
         return reply({ content: [{ type: "text", text }], structuredContent: result, isError: Boolean(rejected) });
       } catch (err) {

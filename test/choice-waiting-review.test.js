@@ -391,7 +391,8 @@ test("MCP and /api/events surface choice_rejected (isError / HTTP 409|400) inste
       choice_resolved: { value: "b" },
     });
     assert.equal(conflict.result.isError, true);
-    assert.equal(conflict.result.content[0].text, "already chosen");
+    assert.equal(conflict.result.content[0].text, `${key} 已更新，选择被拒：already chosen`);
+    assert.equal(conflict.result.structuredContent.task_key, key);
     assert.deepEqual(conflict.result.structuredContent.choice_rejected, { reason: "already chosen", status: 409 });
     assert.equal(store.get(key).choice.value, "a");
 
@@ -461,7 +462,7 @@ test("running→waiting with choice_resolved in one call validates against post-
   });
 });
 
-test("reordering the same option values does not clear the live choice", async () => {
+test("reordering the same option values (labels unchanged) does not clear the live choice", async () => {
   await withServer({}, async ({ base, store, rpc }) => {
     const created = await rpc("kanban_report", {
       title: "Reorder",
@@ -471,17 +472,82 @@ test("reordering the same option values does not clear the live choice", async (
     });
     const key = created.result.structuredContent.task_key;
     await fetch(`${base}/api/tasks/${encodeURIComponent(key)}/choice`, json({ value: "a" }, bearer()));
+    assert.equal(store.get(key).choice.label, "A");
 
     const reorder = await rpc("kanban_report", {
       task_key: key,
       status: "waiting",
       question: "Pick?",
-      options: [{ label: "Bee", value: "b" }, { label: "Aye", value: "a" }],
+      options: [{ label: "B", value: "b" }, { label: "A", value: "a" }],
     });
     assert.equal(reorder.result.isError, false);
     assert.equal(store.get(key).choice.value, "a");
+    assert.equal(store.get(key).choice.label, "A");
     assert.equal(store.get(key).events.some((e) => e.type === "choice_clear"), false);
     assert.deepEqual(store.get(key).options.map((o) => o.value), ["b", "a"]);
+  });
+});
+
+test("relabeling the currently chosen value clears the choice; choice stores label at pick time", async () => {
+  await withServer({}, async ({ base, store, rpc }) => {
+    const created = await rpc("kanban_report", {
+      title: "Relabel",
+      status: "waiting",
+      options: [{ label: "允许", value: "allow" }, { label: "拒绝", value: "deny" }],
+    });
+    const key = created.result.structuredContent.task_key;
+    const pick = await fetch(`${base}/api/tasks/${encodeURIComponent(key)}/choice`, json({ value: "allow" }, bearer()));
+    assert.equal(pick.status, 200);
+    assert.equal((await pick.json()).choice.label, "允许");
+    assert.equal(store.get(key).choice.label, "允许");
+
+    const relabel = await rpc("kanban_report", {
+      task_key: key,
+      status: "waiting",
+      options: [{ label: "允许上线", value: "allow" }, { label: "拒绝", value: "deny" }],
+    });
+    assert.equal(relabel.result.isError, false);
+    assert.equal(store.get(key).choice, null);
+    assert.ok(store.get(key).events.some((e) => e.type === "choice_clear"));
+
+    // Chat pick also stores the label at choice time.
+    const chat = await rpc("kanban_report", {
+      task_key: key,
+      status: "waiting",
+      choice_resolved: { value: "deny" },
+    });
+    assert.equal(chat.result.isError, false);
+    assert.equal(store.get(key).choice.value, "deny");
+    assert.equal(store.get(key).choice.label, "拒绝");
+  });
+});
+
+test("create with rejected choice returns task_key so retry does not duplicate", async () => {
+  await withServer({}, async ({ store, rpc }) => {
+    const first = await rpc("kanban_report", {
+      title: "Need key on reject",
+      status: "waiting",
+      options: [{ label: "A", value: "a" }],
+      choice_resolved: { value: "not-a" },
+    });
+    assert.equal(first.result.isError, true);
+    const key = first.result.structuredContent.task_key;
+    assert.ok(key);
+    assert.equal(first.result.content[0].text, `${key} 已更新，选择被拒：${first.result.structuredContent.choice_rejected.reason}`);
+    assert.match(first.result.structuredContent.choice_rejected.reason, /not in options/);
+    assert.equal(store.tasks.size, 1);
+    assert.equal(store.get(key).choice ?? null, null);
+
+    const retry = await rpc("kanban_report", {
+      task_key: key,
+      status: "waiting",
+      choice_resolved: { value: "a" },
+    });
+    assert.equal(retry.result.isError, false);
+    assert.equal(retry.result.structuredContent.task_key, key);
+    assert.equal(store.tasks.size, 1);
+    assert.equal(store.get(key).choice.value, "a");
+    assert.equal(store.get(key).choice.label, "A");
   });
 });
 

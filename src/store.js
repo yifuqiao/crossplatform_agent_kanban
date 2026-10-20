@@ -66,13 +66,17 @@ function cleanOptions(options) {
     .slice(0, 12);
 }
 
-// Same option values (order/labels ignored) — reorder alone is not a new round.
+// Same option values (order ignored) — reorder alone is not a new round.
 function optionsSameValues(a, b) {
   if (!a && !b) return true;
   if (!a || !b || a.length !== b.length) return false;
   const av = a.map((o) => o.value).sort();
   const bv = b.map((o) => o.value).sort();
   return av.every((v, i) => v === bv[i]);
+}
+
+function optionLabel(options, value) {
+  return options?.find((o) => o.value === value)?.label;
 }
 
 // Same validation for board clicks and chat choice_resolved (except source, which callers force).
@@ -226,13 +230,20 @@ export class Store extends EventEmitter {
     }
 
     // Optional needs-you prompt fields (all omitable; old cards stay unchanged).
-    // A new question or a different set of option values clears the live choice (prior pick stays on the timeline).
-    // Reordering the same values (or relabeling) alone does not.
+    // A new question, a different set of option values, or a new label on the currently
+    // chosen value clears the live choice (prior pick stays on the timeline).
+    // Reordering the same values with unchanged labels does not.
     const options = cleanOptions(input.options);
     const question = cleanString(input.question, 500);
     let newRound = false;
     if (options) {
-      if (!optionsSameValues(task.options, options)) newRound = true;
+      if (!optionsSameValues(task.options, options)) {
+        newRound = true;
+      } else if (task.choice) {
+        const prevLabel = optionLabel(task.options, task.choice.value);
+        const nextLabel = optionLabel(options, task.choice.value);
+        if (prevLabel && nextLabel && prevLabel !== nextLabel) newRound = true;
+      }
       task.options = options;
     }
     if (question && question !== task.question) {
@@ -285,12 +296,13 @@ export class Store extends EventEmitter {
       const check = validateChoice(task, input.choice_resolved.value);
       if (check.ok && !check.idempotent) {
         const by = cleanString(input.choice_by, 80) || null;
-        task.choice = { value: check.cleaned, at: now, source: "chat", by };
+        const label = optionLabel(task.options, check.cleaned) || check.cleaned;
+        task.choice = { value: check.cleaned, label, at: now, source: "chat", by };
         task.events.push({
           id: randomUUID(),
           at: now,
           status: null,
-          message: `Chose “${check.cleaned}” (chat${by ? ` · ${by}` : ""})`,
+          message: `Chose “${label}” (${check.cleaned}, chat${by ? ` · ${by}` : ""})`,
           type: "choice",
         });
         if (task.events.length > MAX_EVENTS) task.events.splice(0, task.events.length - MAX_EVENTS);
@@ -352,12 +364,13 @@ export class Store extends EventEmitter {
     if (check.idempotent) return { task, changed: false };
     const at = new Date().toISOString();
     const who = cleanString(by, 80) || null;
-    task.choice = { value: check.cleaned, at, source: "board", by: who };
+    const label = optionLabel(task.options, check.cleaned) || check.cleaned;
+    task.choice = { value: check.cleaned, label, at, source: "board", by: who };
     task.events.push({
       id: randomUUID(),
       at,
       status: null,
-      message: `Chose “${check.cleaned}” (board${who ? ` · ${who}` : ""})`,
+      message: `Chose “${label}” (${check.cleaned}, board${who ? ` · ${who}` : ""})`,
       type: "choice",
     });
     if (task.events.length > MAX_EVENTS) task.events.splice(0, task.events.length - MAX_EVENTS);
