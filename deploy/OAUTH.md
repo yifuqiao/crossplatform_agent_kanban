@@ -26,26 +26,31 @@ Claude iPhone 应用可以**使用**已经连上的自定义 connector；添加�
    不要选 “Use Claude’s published identity”：看板没有实现 Client ID Metadata Document，选那个会注册失败。
 8. Request headers（请求头）留空。不要把 `AKB_TOKEN` 或来源钥匙贴进这里。
 9. 点 Add。Claude 会打开看板的同意页（应用内浏览器）。
-10. 在同意页上二选一：
+10. 在同意页上二选一。同意页会写明「只在你自己刚在 Claude 里点了连接时才允许」，并给出客户端编号前几位和注册时间。只在自己刚点了连接时才点允许。
     - **企业微信**：点「用企业微信登录」，用白名单里的账号（`QiaoYiFu`）完成登录，回到同意页后来源选 **`claude-code`**，点「允许」。
     - **来源钥匙**：把已经配在 `AKB_SOURCE_TOKENS` 里的那把 `claude-code` 钥匙贴进密码框，点「用这把钥匙允许」。钥匙只在这一次证明身份，不会变成管理员。
 11. 浏览器回到 Claude，连接器显示已连接。开一个对话，在工具里打开 **Agent Kanban**。
 
-同意页明确不会发管理员令牌。发出来的访问令牌和所选来源钥匙等价：
+同意页明确不会发管理员令牌。发出来的访问令牌和当时那次授权的凭证等价：
 
-- 企业微信登录后只能从已配置的来源名里选（例如 `claude-code`），看不到 admin。
-- 贴钥匙则按那把钥匙的来源（以及 `@bot` 绑定）授权。
-- 不能改成 `grok-bot` 或其他来源，也不能调用 `/api/*`。
+- 企业微信登录后只能选 `AKB_OAUTH_SOURCES` 里的来源（默认只有 `claude-code`），看不到 admin，也看不到没列进去的 `grok-bot`。
+- 某个来源如果只配置了 `source@bot` 钥匙，同意页按 bot 列出（例如 `grok-bot@ops-bot`）。令牌绑在这个 bot 上，不会变成能看该来源全部卡片的无绑定令牌。
+- 贴钥匙则按那把钥匙的来源（以及 `@bot` 绑定）授权，并且记的是这把钥匙的条目。换一把同名钥匙后，旧的 OAuth 令牌失效。
+- 不能改成别的来源，也不能调用 `/api/*`。
 
-访问令牌大约 1 小时，刷新令牌大约 30 天并且会轮换。Claude 会自己刷新。
+访问令牌大约 1 小时。整次授权从同意那一刻起最多 30 天；刷新会轮换令牌，但不会把这 30 天往后推。Claude 会自己刷新。撤掉对应的来源钥匙，或把企业微信用户移出 `AKB_WECOM_USERS`，然后重启看板：已发出的 OAuth 访问令牌和刷新令牌一起失效。静态钥匙的撤销方式不变（删掉那一行并重启）。
 
 ## 服务器上要先有的东西
 
-- `AKB_PUBLIC_URL=https://relay.onetopway.com/kanban`（https，不要尾部斜杠；issuer 就是这个地址）。
+这次上线要改 `/etc/agent-kanban.env`（`root:root 0600`）。不要改 Caddyfile，不要改 systemd 单元。
+
+- `AKB_PUBLIC_URL` 必须继续是 `https://relay.onetopway.com/kanban`（https，不要尾部斜杠）。OAuth 的 issuer 和企微登录的回调都用这一个地址，两边要保持一致，不要为 OAuth 另设一个 URL。
 - `AKB_BASE_PATH=/kanban`。
-- `AKB_SOURCE_TOKENS` 里至少有一条 `claude-code:<sha256>`，同意页才列得出这个来源，贴钥匙才能对上。
+- `AKB_OAUTH_SOURCES`：企业微信同意页允许点选的来源名，逗号分隔。不设时只有 `claude-code`。不要把 `grok-bot` 加进去，除非确实要让登录用户代那个来源发令牌。只配了 `@bot` 钥匙的来源会按 bot 出现，令牌带上这个 bot。
+- `AKB_SOURCE_TOKENS` 里至少有一条不带 `@bot` 的 `claude-code:<sha256>`，同意页才列得出 `claude-code`，贴钥匙才能对上。
   生成：在服务器上 `akb token-new --source claude-code`，钥匙只私下给，哈希写进 env。
-- `AKB_DATA_DIR` 可写。OAuth 状态在 `$AKB_DATA_DIR/oauth.json`（原子写入，`0600`），和 `state.json` 分开。
+- `AKB_TRUST_PROXY`：默认不设。不设时看板用 TCP 对端做限流，忽略客户端自己带的 `X-Forwarded-For`。看板只听 `127.0.0.1:7311`，对端是本机 Caddy，所以要让限流看见真实客户端时，设 `AKB_TRUST_PROXY=127.0.0.1`。这只有在 Caddy **覆盖**（不是追加）客户端送来的 `X-Forwarded-For` 时才安全：第一跳必须是 Caddy 看到的地址，不能是客户端自己填的。本说明不修改 Caddy；在确认 Caddy 会覆盖该头之前，不要设 `AKB_TRUST_PROXY`。
+- `AKB_DATA_DIR` 可写。OAuth 状态在 `$AKB_DATA_DIR/oauth.json`（原子写入，`0600`），和 `state.json` 分开。进行中的同意请求只放内存，不写进这个文件；看板重启后要重新在 Claude 里点连接。
   已有卡片不会被删、也不会因为 OAuth 被重写。
 - 重定向默认只允许：
   - `https://claude.ai/api/mcp/auth_callback`

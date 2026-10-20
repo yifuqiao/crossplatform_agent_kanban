@@ -3,12 +3,14 @@ import path from "node:path";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { hashToken, matchSourceToken } from "./source-tokens.js";
 import { clearCookieHeader, cookieHeader, parseCookies, signPayload, verifyPayload } from "./session.js";
+import { isWecomWired, loadWecomConfig } from "./wecom.js";
 
 // OAuth 2.1 for MCP clients that cannot send a static Bearer (claude.ai, Claude iOS).
 // Everything lives under /kanban so the relay's own OAuth page at the domain root is not involved.
 // Tokens are opaque; only sha256 hashes are stored. oauth.json sits next to state.json and is the
-// only file this module writes. If the signing key or that file cannot be loaded, ready is false:
-// these routes return 503 and static Bearer keys keep working.
+// only file this module writes. Pending consent requests stay in memory. If the signing key or
+// oauth.json cannot be loaded, ready is false: these routes return 503 and static Bearer keys
+// keep working.
 
 export const OAUTH_CSRF_COOKIE = "akb_oauth_csrf";
 export const DEFAULT_REDIRECTS = Object.freeze([
@@ -19,11 +21,19 @@ export const DEFAULT_REDIRECTS = Object.freeze([
 const CODE_TTL_MS = 60 * 1000;
 const CODE_KEEP_MS = 10 * 60 * 1000;
 const ACCESS_TTL_MS = 60 * 60 * 1000;
-const REFRESH_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+// Absolute grant lifetime, measured from consent. Refresh rotates tokens but does not extend this.
+const GRANT_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const PENDING_TTL_MS = 10 * 60 * 1000;
-const ACCESS_EXPIRES_IN = 3600;
 const CHALLENGE_RE = /^[A-Za-z0-9_-]{43,128}$/;
 const VERIFIER_RE = /^[\w.~-]{43,128}$/;
+const SOURCE_NAME = /^[a-z0-9][a-z0-9._-]{0,59}$/;
+const MAX_CLIENTS = 400;
+const MAX_PENDING = 500;
+const MAX_PENDING_PER_CLIENT = 5;
+const FRAME_HEADERS = {
+  "x-frame-options": "DENY",
+  "content-security-policy": "frame-ancestors 'none'",
+};
 
 const PATHS = new Set([
   "/.well-known/oauth-protected-resource",
@@ -87,10 +97,47 @@ export function redirectAllowList(env = process.env) {
   return set;
 }
 
-function clientIp(req) {
-  const xff = req.headers["x-forwarded-for"];
-  if (typeof xff === "string" && xff.trim()) return xff.split(",")[0].trim().slice(0, 80);
-  return req.socket?.remoteAddress || "local";
+// Sources a WeCom session may consent to. Unset → only claude-code.
+// An explicit empty value allows none. Names are source ids, not source@agent.
+export function oauthSourceAllowList(env = process.env) {
+  const configured = env != null && Object.prototype.hasOwnProperty.call(env, "AKB_OAUTH_SOURCES");
+  const raw = configured ? String(env.AKB_OAUTH_SOURCES || "") : "claude-code";
+  const out = new Set();
+  for (const part of raw.split(",")) {
+    const s = part.trim().toLowerCase();
+    if (SOURCE_NAME.test(s)) out.add(s);
+  }
+  return out;
+}
+
+function normalizeIp(value) {
+  let s = String(value || "").trim().toLowerCase();
+  if (s.startsWith("::ffff:")) s = s.slice("::ffff:".length);
+  return s;
+}
+
+// X-Forwarded-For is ignored unless AKB_TRUST_PROXY lists the TCP peer (Caddy on 127.0.0.1).
+function trustedProxySet(env) {
+  const raw = String(env?.AKB_TRUST_PROXY || "").trim();
+  if (!raw) return null;
+  const set = new Set();
+  for (const part of raw.split(",")) {
+    const ip = normalizeIp(part);
+    if (ip) set.add(ip);
+  }
+  return set.size ? set : null;
+}
+
+function clientIp(req, trust) {
+  const remote = normalizeIp(req.socket?.remoteAddress || "") || "local";
+  if (trust && trust.has(remote)) {
+    const xff = req.headers["x-forwarded-for"];
+    if (typeof xff === "string" && xff.trim()) {
+      const hop = normalizeIp(xff.split(",")[0]);
+      if (hop) return hop.slice(0, 80);
+    }
+  }
+  return remote.slice(0, 80);
 }
 
 function makeLimiter(now, limit, windowMs) {
@@ -129,14 +176,20 @@ export function createOauth({
   const clock = typeof now === "function" ? now : Date.now;
   const issuer = normalizePublicUrl(publicUrl);
   const allow = redirectAllowList(env);
+  const trust = trustedProxySet(env);
   const resource = issuer ? `${issuer}/mcp` : "";
   const file = dataDir ? path.join(dataDir, "oauth.json") : null;
   const allowToken = makeLimiter(clock, 30, 60 * 1000);
   const allowPaste = makeLimiter(clock, 5, 10 * 60 * 1000);
   const allowRegister = makeLimiter(clock, 30, 60 * 60 * 1000);
+  const allowAuthorizeIp = makeLimiter(clock, 30, 60 * 1000);
+  const allowAuthorizeClient = makeLimiter(clock, 10, 10 * 60 * 1000);
+  const ipOf = (req) => clientIp(req, trust);
 
   let ready = false;
   let state = null;
+  // Consent requests are not written to oauth.json. A restart drops in-progress logins.
+  const pending = new Map();
 
   function logDisabled(reason) {
     console.error(`[akb] oauth disabled: ${reason}`);
@@ -163,12 +216,71 @@ export function createOauth({
     }
   }
 
-  function sourceNames() {
-    const out = [];
+  function consentOptions() {
+    const allowSources = oauthSourceAllowList(env);
+    const grouped = new Map();
     for (const e of sourceEntries || []) {
-      if (e && typeof e.source === "string" && e.source && !out.includes(e.source)) out.push(e.source);
+      if (!e || typeof e.source !== "string" || !allowSources.has(e.source)) continue;
+      if (!grouped.has(e.source)) grouped.set(e.source, []);
+      grouped.get(e.source).push(e);
     }
-    return out;
+    const options = [];
+    for (const [source, entries] of grouped) {
+      // An unbound key already sees every card of this source, so the session grant matches it.
+      // A source that only has @agent keys is offered per bot; the grant carries that agentName
+      // and is never a wider unbound principal.
+      if (entries.some((e) => !e.agentName)) {
+        options.push({ source, agentName: null, value: source });
+        continue;
+      }
+      const seen = new Set();
+      for (const e of entries) {
+        if (!e.agentName || seen.has(e.agentName)) continue;
+        seen.add(e.agentName);
+        options.push({ source, agentName: e.agentName, value: `${source}@${e.agentName}` });
+      }
+    }
+    return options;
+  }
+
+  function wecomAllow() {
+    const cfg = loadWecomConfig({ env, dataDir });
+    if (!isWecomWired(cfg)) return [];
+    return cfg.users;
+  }
+
+  function grantCovered(rec) {
+    const entries = (sourceEntries || []).filter((e) => e && e.source === rec.source);
+    if (rec.agentName) return entries.some((e) => e.agentName === rec.agentName);
+    return entries.some((e) => !e.agentName);
+  }
+
+  // Pasted-key grants die when that entry id is gone. WeCom grants die when the uid leaves
+  // the allow-list, the source leaves AKB_OAUTH_SOURCES, or no configured key still covers
+  // the principal. grantExp is the absolute cap from consent.
+  function provenanceOk(rec) {
+    if (!rec || typeof rec.grantExp !== "number" || rec.grantExp <= clock()) return false;
+    const auth = rec.auth;
+    if (!auth || typeof auth !== "object") return false;
+    if (auth.kind === "key") {
+      const entry = (sourceEntries || []).find((e) => e && e.id === auth.id);
+      if (!entry || entry.source !== rec.source) return false;
+      return (entry.agentName || null) === (rec.agentName || null);
+    }
+    if (auth.kind === "wecom") {
+      if (typeof auth.uid !== "string" || !auth.uid) return false;
+      if (!wecomAllow().includes(auth.uid)) return false;
+      if (!oauthSourceAllowList(env).has(rec.source)) return false;
+      return grantCovered(rec);
+    }
+    return false;
+  }
+
+  function copyAuth(auth) {
+    if (!auth || typeof auth !== "object") return null;
+    if (auth.kind === "key" && typeof auth.id === "string" && auth.id) return { kind: "key", id: auth.id };
+    if (auth.kind === "wecom" && typeof auth.uid === "string" && auth.uid) return { kind: "wecom", uid: auth.uid };
+    return null;
   }
 
   function load() {
@@ -183,7 +295,6 @@ export function createOauth({
           version: 1,
           signingKey: randomBytes(32).toString("base64url"),
           clients: {},
-          pending: {},
           codes: {},
           access: {},
           refresh: {},
@@ -201,7 +312,6 @@ export function createOauth({
         version: 1,
         signingKey: raw.signingKey,
         clients: raw.clients && typeof raw.clients === "object" ? raw.clients : {},
-        pending: raw.pending && typeof raw.pending === "object" ? raw.pending : {},
         codes: raw.codes && typeof raw.codes === "object" ? raw.codes : {},
         access: raw.access && typeof raw.access === "object" ? raw.access : {},
         refresh: raw.refresh && typeof raw.refresh === "object" ? raw.refresh : {},
@@ -222,10 +332,24 @@ export function createOauth({
     return { "www-authenticate": `Bearer resource_metadata="${issuer}/.well-known/oauth-protected-resource"` };
   }
 
+  function dropFamily(family) {
+    if (!family) return;
+    try {
+      mutate(() => revokeFamily(family));
+    } catch {
+      // Still deny the token if the revoke could not be persisted.
+    }
+  }
+
   function principalForBearer(token) {
     if (!ready || typeof token !== "string" || token.length < 32 || token.length > 256) return null;
     const rec = state.access[hashToken(token)];
-    if (!rec || typeof rec.exp !== "number" || rec.exp <= clock() || typeof rec.source !== "string") return null;
+    if (!rec || typeof rec.exp !== "number" || typeof rec.source !== "string") return null;
+    if (rec.exp <= clock()) return null;
+    if (!provenanceOk(rec)) {
+      dropFamily(rec.family);
+      return null;
+    }
     return { source: rec.source, agentName: rec.agentName || null };
   }
 
@@ -283,8 +407,20 @@ export function createOauth({
     sendHtml(res, status, html, {
       "referrer-policy": "no-referrer",
       "x-content-type-options": "nosniff",
+      ...FRAME_HEADERS,
       ...headers,
     });
+  }
+
+  function originOk(req) {
+    const origin = req.headers.origin;
+    if (typeof origin !== "string" || !origin || origin.length > 200 || !issuer) return false;
+    try {
+      const got = new URL(origin);
+      return got.origin === origin && got.origin === new URL(issuer).origin;
+    } catch {
+      return false;
+    }
   }
 
   function csrfSetCookie(base, id) {
@@ -292,20 +428,22 @@ export function createOauth({
     return cookieHeader(OAUTH_CSRF_COOKIE, signed, { basePath: base || "/", maxAge: PENDING_TTL_MS / 1000 });
   }
 
-  function consentHtml({ base, client, pending, id, session, banner, wecomWired }) {
-    const names = sourceNames();
-    const requested = new Set(String(pending.scope || "").split(/\s+/).filter(Boolean));
-    const pre = names.find((s) => requested.has(s)) || names[0] || "";
+  function consentHtml({ base, client, pending: reqPending, id, session, banner, wecomWired }) {
+    const options = consentOptions();
+    const requested = new Set(String(reqPending.scope || "").split(/\s+/).filter(Boolean));
+    const pre = options.find((o) => requested.has(o.value) || requested.has(o.source))?.value || options[0]?.value || "";
     let host = "";
-    try { host = new URL(pending.redirectUri).host; } catch { host = ""; }
+    try { host = new URL(reqPending.redirectUri).host; } catch { host = ""; }
     const who = client.name || "这个客户端";
+    const clientPrefix = String(reqPending.clientId || "").slice(0, 8);
+    const registered = typeof client.createdAt === "number" ? new Date(client.createdAt).toISOString() : "未知";
     const loginNext = `${base}/oauth/authorize?resume=${encodeURIComponent(id)}`;
     const loginHref = `${base}/auth/wecom/start?next=${encodeURIComponent(loginNext)}`;
-    const radios = names.map((s) => {
-      const checked = s === pre ? " checked" : "";
-      return `<label class="choice"><input type="radio" name="source" value="${escapeHtml(s)}"${checked}> ${escapeHtml(s)}</label>`;
+    const radios = options.map((o) => {
+      const checked = o.value === pre ? " checked" : "";
+      return `<label class="choice"><input type="radio" name="source" value="${escapeHtml(o.value)}"${checked}> ${escapeHtml(o.value)}</label>`;
     }).join("");
-    const sessionBlock = session && names.length
+    const sessionBlock = session && options.length
       ? `<p>已登录：<strong>${escapeHtml(session.uid)}</strong>。选择这个连接要充当的来源（不能选管理员）：</p>
         <form method="POST" action="${escapeHtml(base)}/oauth/authorize">
           <input type="hidden" name="csrf" value="${escapeHtml(id)}">
@@ -314,7 +452,7 @@ export function createOauth({
           <button type="submit">允许</button>
         </form>`
       : session
-        ? `<p>已登录：<strong>${escapeHtml(session.uid)}</strong>，但服务器没有配置任何来源钥匙，无法选择来源。</p>`
+        ? `<p>已登录：<strong>${escapeHtml(session.uid)}</strong>，但没有可通过登录授予的来源。来源若只配置了某个 bot 的钥匙，只会按该 bot 列出；未列入 AKB_OAUTH_SOURCES 的来源不会出现。</p>`
         : `<p>尚未登录。${wecomWired ? `<a href="${escapeHtml(loginHref)}">用企业微信登录</a>，登录后选择来源。` : "请粘贴一把来源钥匙。"}</p>`;
     const note = banner ? `<p class="warn">${escapeHtml(banner)}</p>` : "";
     return `<!doctype html>
@@ -330,8 +468,10 @@ export function createOauth({
   .muted{color:#475569;font-size:.9rem}
 </style></head><body>
 <h1>允许连接看板</h1>
+<p class="warn">「只在你自己刚在 Claude 里点了连接时才允许」</p>
 ${note}
 <p><strong>${escapeHtml(who)}</strong> 要连接 Agent Kanban，并以某个来源的身份上报任务。这不会授予管理员权限。</p>
+<p>客户端 <code>${escapeHtml(clientPrefix)}…</code>，注册于 <code>${escapeHtml(registered)}</code></p>
 <p>回调主机：<code>${escapeHtml(host)}</code></p>
 ${sessionBlock}
 <h2>或者粘贴来源钥匙</h2>
@@ -351,24 +491,24 @@ ${sessionBlock}
 </body></html>`;
   }
 
-  function showConsent(res, sendHtml, ctx, id, pending) {
-    const client = state.clients[pending.clientId];
+  function showConsent(res, sendHtml, ctx, id, reqPending) {
+    const client = state.clients[reqPending.clientId];
     if (!client) {
       page(res, sendHtml, 400, "<!doctype html><title>Expired</title><p>This sign-in expired. Go back to Claude and try again.</p>");
       return;
     }
     const session = ctx.session() || null;
     page(res, sendHtml, 200, consentHtml({
-      base: ctx.base, client, pending, id, session, banner: "", wecomWired: ctx.wecomWired,
+      base: ctx.base, client, pending: reqPending, id, session, banner: "", wecomWired: ctx.wecomWired,
     }), {
       "set-cookie": csrfSetCookie(ctx.base, id),
     });
   }
 
-  function rejectConsent(res, sendHtml, ctx, id, pending, status, banner) {
-    const client = state.clients[pending.clientId];
+  function rejectConsent(res, sendHtml, ctx, id, reqPending, status, banner) {
+    const client = state.clients[reqPending.clientId];
     page(res, sendHtml, status, consentHtml({
-      base: ctx.base, client, pending, id, session: ctx.session() || null, banner, wecomWired: ctx.wecomWired,
+      base: ctx.base, client, pending: reqPending, id, session: ctx.session() || null, banner, wecomWired: ctx.wecomWired,
     }), { "set-cookie": csrfSetCookie(ctx.base, id) });
   }
 
@@ -378,18 +518,51 @@ ${sessionBlock}
     for (const [k, v] of Object.entries(state.refresh)) if (v.family === family) delete state.refresh[k];
   }
 
+  function clientHasLiveRefresh(clientId) {
+    const t = clock();
+    for (const rec of Object.values(state.refresh)) {
+      if (rec && rec.clientId === clientId && rec.exp > t && !rec.replacedBy) return true;
+    }
+    return false;
+  }
+
   function trim() {
     const ids = Object.keys(state.clients);
-    if (ids.length > 400) {
-      ids.sort((a, b) => (state.clients[a].createdAt || 0) - (state.clients[b].createdAt || 0));
-      for (const id of ids.slice(0, ids.length - 400)) delete state.clients[id];
+    if (ids.length > MAX_CLIENTS) {
+      const evictable = ids.filter((id) => !clientHasLiveRefresh(id));
+      evictable.sort((a, b) => (state.clients[a].createdAt || 0) - (state.clients[b].createdAt || 0));
+      let extra = ids.length - MAX_CLIENTS;
+      for (const id of evictable) {
+        if (extra <= 0) break;
+        delete state.clients[id];
+        extra--;
+      }
     }
-    for (const bag of [state.access, state.refresh, state.codes, state.pending]) {
+    for (const bag of [state.access, state.refresh, state.codes]) {
       const keys = Object.keys(bag);
       if (keys.length <= 2000) continue;
       keys.sort((a, b) => (bag[a].exp || bag[a].keepUntil || 0) - (bag[b].exp || bag[b].keepUntil || 0));
       for (const k of keys.slice(0, keys.length - 2000)) delete bag[k];
     }
+  }
+
+  function sweepPending() {
+    const t = clock();
+    for (const [id, rec] of pending) {
+      if (!rec || rec.exp <= t) pending.delete(id);
+    }
+  }
+
+  function rememberPending(id, rec) {
+    sweepPending();
+    const mine = [];
+    for (const [k, v] of pending) if (v.clientId === rec.clientId) mine.push(k);
+    mine.sort((a, b) => pending.get(a).exp - pending.get(b).exp);
+    while (mine.length >= MAX_PENDING_PER_CLIENT) pending.delete(mine.shift());
+    pending.set(id, rec);
+    if (pending.size <= MAX_PENDING) return;
+    const ranked = [...pending.entries()].sort((a, b) => a[1].exp - b[1].exp);
+    while (pending.size > MAX_PENDING && ranked.length) pending.delete(ranked.shift()[0]);
   }
 
   async function readForm(req, readBody) {
@@ -400,27 +573,33 @@ ${sessionBlock}
   }
 
   function issueTokens(rec) {
+    const auth = copyAuth(rec.auth);
+    const t = clock();
+    if (!auth || typeof rec.grantExp !== "number" || rec.grantExp <= t) return null;
     const access = randomBytes(32).toString("base64url");
     const refresh = randomBytes(32).toString("base64url");
-    const t = clock();
-    state.access[hashToken(access)] = {
-      clientId: rec.clientId, source: rec.source, agentName: rec.agentName || null,
-      exp: t + ACCESS_TTL_MS, family: rec.family,
+    const accessExp = Math.min(t + ACCESS_TTL_MS, rec.grantExp);
+    const expiresIn = Math.max(0, Math.floor((accessExp - t) / 1000));
+    const baseRec = {
+      clientId: rec.clientId,
+      source: rec.source,
+      agentName: rec.agentName || null,
+      family: rec.family,
+      auth,
+      grantExp: rec.grantExp,
     };
-    state.refresh[hashToken(refresh)] = {
-      clientId: rec.clientId, source: rec.source, agentName: rec.agentName || null,
-      exp: t + REFRESH_TTL_MS, family: rec.family, replacedBy: null,
-    };
-    return { access, refresh, source: rec.source };
+    state.access[hashToken(access)] = { ...baseRec, exp: accessExp };
+    state.refresh[hashToken(refresh)] = { ...baseRec, exp: rec.grantExp, replacedBy: null };
+    return { access, refresh, source: rec.source, expiresIn };
   }
 
-  function tokenJson(res, send, access, refresh, source) {
+  function tokenJson(res, send, issued) {
     json(res, send, 200, {
-      access_token: access,
+      access_token: issued.access,
       token_type: "Bearer",
-      expires_in: ACCESS_EXPIRES_IN,
-      refresh_token: refresh,
-      scope: `${source} offline_access`,
+      expires_in: issued.expiresIn,
+      refresh_token: issued.refresh,
+      scope: `${issued.source} offline_access`,
     }, { pragma: "no-cache" });
   }
 
@@ -464,7 +643,7 @@ ${sessionBlock}
           json(res, send, 405, { error: "method not allowed" }, { allow: "POST" });
           return true;
         }
-        if (!allowRegister(clientIp(req))) {
+        if (!allowRegister(ipOf(req))) {
           json(res, send, 429, { error: "slow_down" });
           return true;
         }
@@ -513,6 +692,12 @@ ${sessionBlock}
         const clientId = randomBytes(32).toString("base64url");
         const createdAt = clock();
         const client = { name: cleanName(body.client_name), redirectUris: uris.slice(), createdAt };
+        const atCap = Object.keys(state.clients).length >= MAX_CLIENTS;
+        const canEvict = Object.keys(state.clients).some((id) => !clientHasLiveRefresh(id));
+        if (atCap && !canEvict) {
+          json(res, send, 429, { error: "slow_down" });
+          return true;
+        }
         mutate(() => {
           state.clients[clientId] = client;
           trim();
@@ -531,15 +716,19 @@ ${sessionBlock}
       }
 
       if (url.pathname === "/oauth/authorize") {
+        if (!allowAuthorizeIp(ipOf(req))) {
+          json(res, send, 429, { error: "slow_down" });
+          return true;
+        }
         if (req.method === "GET") {
           const resume = url.searchParams.get("resume");
           if (resume && !url.searchParams.get("client_id")) {
-            const pending = state.pending[resume];
-            if (!pending || pending.exp <= clock()) {
+            const reqPending = pending.get(resume);
+            if (!reqPending || reqPending.exp <= clock()) {
               page(res, sendHtml, 400, "<!doctype html><title>Expired</title><p>This sign-in expired. Go back to Claude and try again.</p>");
               return true;
             }
-            showConsent(res, sendHtml, ctx, resume, pending);
+            showConsent(res, sendHtml, ctx, resume, reqPending);
             return true;
           }
           const clientId = url.searchParams.get("client_id") || "";
@@ -556,6 +745,10 @@ ${sessionBlock}
             page(res, sendHtml, 400, "<!doctype html><title>Invalid client</title><p>Unknown client or redirect URI.</p>");
             return true;
           }
+          if (!allowAuthorizeClient(clientId)) {
+            json(res, send, 429, { error: "slow_down" });
+            return true;
+          }
           const fail = (error) => errorRedirect(res, redirectUri, error, oauthState);
           if (url.searchParams.get("response_type") !== "code") return fail("unsupported_response_type"), true;
           if (url.searchParams.get("code_challenge_method") !== "S256") return fail("invalid_request"), true;
@@ -564,7 +757,7 @@ ${sessionBlock}
           const resourceParam = url.searchParams.get("resource");
           if (resourceParam && resourceParam !== resource) return fail("invalid_target"), true;
           const id = randomBytes(32).toString("base64url");
-          const pending = {
+          const reqPending = {
             clientId,
             redirectUri,
             state: oauthState,
@@ -572,11 +765,8 @@ ${sessionBlock}
             scope: (url.searchParams.get("scope") || "").slice(0, 200),
             exp: clock() + PENDING_TTL_MS,
           };
-          mutate(() => {
-            state.pending[id] = pending;
-            trim();
-          });
-          showConsent(res, sendHtml, ctx, id, pending);
+          rememberPending(id, reqPending);
+          showConsent(res, sendHtml, ctx, id, reqPending);
           return true;
         }
         if (req.method !== "POST") {
@@ -589,58 +779,72 @@ ${sessionBlock}
           return true;
         }
         const params = form.params;
+        if (!originOk(req)) {
+          page(res, sendHtml, 403, "<!doctype html><title>Bad origin</title><p>Consent form was rejected.</p>");
+          return true;
+        }
         const csrf = params.get("csrf") || "";
         const resume = params.get("resume") || "";
         const cookies = parseCookies(req.headers.cookie);
         const payload = verifyPayload(state.signingKey, cookies[OAUTH_CSRF_COOKIE]);
-        if (!payload || payload.id !== csrf || csrf !== resume || !state.pending[resume]) {
+        const reqPending = pending.get(resume);
+        if (!payload || payload.id !== csrf || csrf !== resume || !reqPending) {
           page(res, sendHtml, 403, "<!doctype html><title>Bad session</title><p>Consent session expired. Go back to Claude and try again.</p>");
           return true;
         }
-        const pending = state.pending[resume];
-        if (pending.exp <= clock() || !state.clients[pending.clientId]) {
+        if (reqPending.exp <= clock() || !state.clients[reqPending.clientId]) {
           page(res, sendHtml, 400, "<!doctype html><title>Expired</title><p>This sign-in expired. Go back to Claude and try again.</p>");
           return true;
         }
         if (params.get("deny") === "1") {
-          const { redirectUri, state: oauthState } = pending;
-          mutate(() => { delete state.pending[resume]; });
+          const { redirectUri, state: oauthState } = reqPending;
+          pending.delete(resume);
           errorRedirect(res, redirectUri, "access_denied", oauthState);
           return true;
         }
         const pasted = params.get("source_key") || "";
         let principal = null;
         if (pasted.trim()) {
-          if (!allowPaste(clientIp(req))) {
+          if (!allowPaste(ipOf(req))) {
             json(res, send, 429, { error: "slow_down" });
             return true;
           }
           if (pasted.length > 256 || !matchSourceToken(pasted.trim(), sourceEntries || [])) {
-            rejectConsent(res, sendHtml, ctx, resume, pending, 401, "钥匙无法识别。");
+            rejectConsent(res, sendHtml, ctx, resume, reqPending, 401, "钥匙无法识别。");
             return true;
           }
           const entry = matchSourceToken(pasted.trim(), sourceEntries || []);
-          principal = { source: entry.source, agentName: entry.agentName || null };
+          principal = {
+            source: entry.source,
+            agentName: entry.agentName || null,
+            auth: { kind: "key", id: entry.id },
+          };
         } else {
           const session = ctx.session();
-          const source = String(params.get("source") || "").trim().toLowerCase();
-          if (!session || !sourceNames().includes(source)) {
-            rejectConsent(res, sendHtml, ctx, resume, pending, 400, session ? "请选择一个已配置的来源。" : "请先登录，或粘贴来源钥匙。");
+          const choice = consentOptions().find((o) => o.value === String(params.get("source") || "").trim());
+          if (!session || !choice) {
+            rejectConsent(res, sendHtml, ctx, resume, reqPending, 400, session ? "请选择一个允许的来源。" : "请先登录，或粘贴来源钥匙。");
             return true;
           }
-          principal = { source, agentName: null };
+          principal = {
+            source: choice.source,
+            agentName: choice.agentName,
+            auth: { kind: "wecom", uid: session.uid },
+          };
         }
         const code = randomBytes(32).toString("base64url");
         const family = randomBytes(16).toString("hex");
         const t = clock();
         mutate(() => {
-          delete state.pending[resume];
+          pending.delete(resume);
           state.codes[hashToken(code)] = {
-            clientId: pending.clientId,
-            redirectUri: pending.redirectUri,
-            challenge: pending.challenge,
+            clientId: reqPending.clientId,
+            redirectUri: reqPending.redirectUri,
+            challenge: reqPending.challenge,
             source: principal.source,
             agentName: principal.agentName,
+            auth: copyAuth(principal.auth),
+            grantExp: t + GRANT_TTL_MS,
             redeemUntil: t + CODE_TTL_MS,
             keepUntil: t + CODE_KEEP_MS,
             used: false,
@@ -648,9 +852,9 @@ ${sessionBlock}
           };
           trim();
         });
-        const dest = new URL(pending.redirectUri);
+        const dest = new URL(reqPending.redirectUri);
         dest.searchParams.set("code", code);
-        if (pending.state) dest.searchParams.set("state", pending.state);
+        if (reqPending.state) dest.searchParams.set("state", reqPending.state);
         redirectTo(res, dest.toString(), {
           "set-cookie": clearCookieHeader(OAUTH_CSRF_COOKIE, { basePath: ctx.base || "/" }),
         });
@@ -662,7 +866,7 @@ ${sessionBlock}
           json(res, send, 405, { error: "method not allowed" }, { allow: "POST" });
           return true;
         }
-        if (!allowToken(clientIp(req))) {
+        if (!allowToken(ipOf(req))) {
           json(res, send, 429, { error: "slow_down" });
           return true;
         }
@@ -716,13 +920,25 @@ ${sessionBlock}
             json(res, send, 400, { error: "invalid_grant" });
             return true;
           }
+          if (!provenanceOk(rec)) {
+            mutate(() => {
+              rec.used = true;
+              revokeFamily(rec.family);
+            });
+            json(res, send, 400, { error: "invalid_grant" });
+            return true;
+          }
           let issued;
           mutate(() => {
             rec.used = true;
             issued = issueTokens(rec);
             trim();
           });
-          tokenJson(res, send, issued.access, issued.refresh, issued.source);
+          if (!issued) {
+            json(res, send, 400, { error: "invalid_grant" });
+            return true;
+          }
+          tokenJson(res, send, issued);
           return true;
         }
         if (grant === "refresh_token") {
@@ -741,7 +957,8 @@ ${sessionBlock}
             json(res, send, 400, { error: "invalid_grant" });
             return true;
           }
-          if (rec.exp <= clock()) {
+          if (!provenanceOk(rec)) {
+            mutate(() => revokeFamily(rec.family));
             json(res, send, 400, { error: "invalid_grant" });
             return true;
           }
@@ -749,10 +966,14 @@ ${sessionBlock}
           mutate(() => {
             for (const [k, a] of Object.entries(state.access)) if (a.family === rec.family) delete state.access[k];
             issued = issueTokens(rec);
-            rec.replacedBy = hashToken(issued.refresh);
+            if (issued) rec.replacedBy = hashToken(issued.refresh);
             trim();
           });
-          tokenJson(res, send, issued.access, issued.refresh, issued.source);
+          if (!issued) {
+            json(res, send, 400, { error: "invalid_grant" });
+            return true;
+          }
+          tokenJson(res, send, issued);
           return true;
         }
         json(res, send, 400, { error: grant ? "unsupported_grant_type" : "invalid_request" });
@@ -764,7 +985,7 @@ ${sessionBlock}
           json(res, send, 405, { error: "method not allowed" }, { allow: "POST" });
           return true;
         }
-        if (!allowToken(clientIp(req))) {
+        if (!allowToken(ipOf(req))) {
           json(res, send, 429, { error: "slow_down" });
           return true;
         }

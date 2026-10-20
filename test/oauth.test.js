@@ -100,10 +100,10 @@ async function mcp(base, token, method, params, id = 1) {
   return { status: res.status, text, www: res.headers.get("www-authenticate"), body: text ? JSON.parse(text) : null };
 }
 
-async function registerClient(base, redirectUris = [REDIRECT], envBody = {}) {
+async function registerClient(base, redirectUris = [REDIRECT], envBody = {}, headers = {}) {
   const res = await fetch(`${base}/kanban/oauth/register`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...(headers || {}) },
     body: JSON.stringify({
       client_name: "Claude",
       redirect_uris: redirectUris,
@@ -140,19 +140,27 @@ async function authorizePage(base, clientId, { challenge, redirect = REDIRECT, m
     resume: csrf ? csrf[1] : "",
     csrfCookie: cookiePair(res, OAUTH_CSRF_COOKIE),
     setCookie: setCookies(res).find((l) => l.startsWith(`${OAUTH_CSRF_COOKIE}=`)) || "",
+    xfo: res.headers.get("x-frame-options"),
+    csp: res.headers.get("content-security-policy"),
   };
 }
 
-async function postConsent(base, { resume, csrfCookie, sessionCookie = "", source = "", sourceKey = "", deny = false }) {
+function radioValues(html) {
+  return [...html.matchAll(/name="source" value="([^"]*)"/g)].map((m) => m[1]);
+}
+
+async function postConsent(base, { resume, csrfCookie, sessionCookie = "", source = "", sourceKey = "", deny = false, origin }) {
   const body = new URLSearchParams({ csrf: resume, resume });
   if (source) body.set("source", source);
   if (sourceKey) body.set("source_key", sourceKey);
   if (deny) body.set("deny", "1");
   const cookie = [sessionCookie, csrfCookie].filter(Boolean).join("; ");
+  const headers = { "content-type": "application/x-www-form-urlencoded", cookie };
+  if (origin !== "") headers.origin = origin === undefined ? new URL(PUBLIC).origin : origin;
   const res = await fetch(`${base}/kanban/oauth/authorize`, {
     method: "POST",
     redirect: "manual",
-    headers: { "content-type": "application/x-www-form-urlencoded", cookie },
+    headers,
     body,
   });
   const location = res.headers.get("location");
@@ -166,7 +174,16 @@ async function postConsent(base, { resume, csrfCookie, sessionCookie = "", sourc
     state = u.searchParams.get("state");
   }
   const text = location ? "" : await res.text();
-  return { status: res.status, location, code, error, state, text };
+  return {
+    status: res.status,
+    location,
+    code,
+    error,
+    state,
+    text,
+    xfo: res.headers.get("x-frame-options"),
+    csp: res.headers.get("content-security-policy"),
+  };
 }
 
 async function exchange(base, { clientId, code, verifier, redirect = REDIRECT, resource = "" }) {
@@ -477,8 +494,7 @@ test("a pasted agent-bound key cannot impersonate another bot; an owner session 
     const session = `${SESSION_COOKIE}=${issueSession(WECOM_ENV.AKB_SESSION_SECRET, "QiaoYiFu")}`;
     const page = await authorizePage(base, clientId, { challenge: pkcePair().challenge, sessionCookie: session });
     assert.match(page.html, /QiaoYiFu/);
-    assert.match(page.html, /value="claude-code"/);
-    assert.match(page.html, /value="grok-bot"/);
+    assert.deepEqual(radioValues(page.html), ["claude-code"]);
     assert.equal(page.html.includes('value="admin"'), false);
     const denied = await postConsent(base, { resume: page.resume, csrfCookie: page.csrfCookie, sessionCookie: session, source: "admin" });
     assert.equal(denied.code, null);
@@ -704,5 +720,390 @@ test("WeCom login returns to the consent page and the chosen source is not admin
     });
     assert.equal(store.get(card.body.result.structuredContent.task_key).createdBy, "mcp:claude-code");
     assert.ok(calls.some((u) => u.includes("/auth/getuserinfo")));
+  });
+});
+
+test("WeCom consent lists only AKB_OAUTH_SOURCES and keeps agent-bound keys bound", async () => {
+  const opsKey = "test-ops-bot-key-padded-to-32-chars-xx";
+  const otherKey = "test-other-bot-key-padded-to-32-chars";
+  const sourceTokens = [
+    `claude-code:${hashToken(CLAUDE_KEY)}`,
+    `grok-bot@ops-bot:${hashToken(opsKey)}`,
+    `grok-bot@other-bot:${hashToken(otherKey)}`,
+  ].join(",");
+  const session = `${SESSION_COOKIE}=${issueSession(WECOM_ENV.AKB_SESSION_SECRET, "QiaoYiFu")}`;
+
+  await withOauth({
+    sourceTokens,
+    env: { AKB_OAUTH_SOURCES: "claude-code,grok-bot" },
+  }, async ({ base, store }) => {
+    const ops = await mcp(base, ADMIN, "tools/call", {
+      name: "kanban_report",
+      arguments: {
+        title: "ops choice",
+        status: "waiting",
+        source: "grok-bot",
+        agent_name: "ops-bot",
+        question: "Pick",
+        options: [{ label: "A", value: "a" }],
+      },
+    });
+    const opsTask = ops.body.result.structuredContent.task_key;
+    const other = await mcp(base, ADMIN, "tools/call", {
+      name: "kanban_report",
+      arguments: { title: "other bot", status: "running", source: "grok-bot", agent_name: "other-bot" },
+    });
+    const otherTask = other.body.result.structuredContent.task_key;
+
+    const reg = await registerClient(base);
+    const clientId = reg.body.client_id;
+    const page = await authorizePage(base, clientId, { challenge: pkcePair().challenge, sessionCookie: session });
+    assert.equal(page.status, 200);
+    assert.equal(page.xfo, "DENY");
+    assert.match(page.csp, /frame-ancestors 'none'/);
+    assert.match(page.html, /「只在你自己刚在 Claude 里点了连接时才允许」/);
+    assert.match(page.html, new RegExp(clientId.slice(0, 8)));
+    assert.equal(page.html.includes(clientId), false);
+    assert.match(page.html, /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
+    assert.deepEqual(radioValues(page.html).sort(), ["claude-code", "grok-bot@ops-bot", "grok-bot@other-bot"].sort());
+    assert.equal(radioValues(page.html).includes("grok-bot"), false);
+
+    const bare = await postConsent(base, {
+      resume: page.resume, csrfCookie: page.csrfCookie, sessionCookie: session, source: "grok-bot",
+    });
+    assert.equal(bare.status, 400);
+    assert.equal(bare.code, null);
+
+    const pair = pkcePair();
+    const page2 = await authorizePage(base, clientId, { challenge: pair.challenge, sessionCookie: session });
+    const post = await postConsent(base, {
+      resume: page2.resume, csrfCookie: page2.csrfCookie, sessionCookie: session, source: "grok-bot@ops-bot",
+    });
+    assert.equal(post.status, 302, post.text.slice(0, 200));
+    const tok = await exchange(base, { clientId, code: post.code, verifier: pair.verifier });
+    assert.equal(tok.status, 200);
+    const created = await mcp(base, tok.body.access_token, "tools/call", {
+      name: "kanban_report",
+      arguments: { title: "Bound grant", status: "running" },
+    });
+    const createdKey = created.body.result.structuredContent.task_key;
+    assert.equal(store.get(createdKey).createdBy, "mcp:grok-bot@ops-bot");
+    const listed = await mcp(base, tok.body.access_token, "tools/call", { name: "kanban_list", arguments: {} });
+    const keys = listed.body.result.structuredContent.tasks.map((t) => t.task_key);
+    assert.ok(keys.includes(opsTask));
+    assert.equal(keys.includes(otherTask), false);
+    const hidden = await mcp(base, tok.body.access_token, "tools/call", {
+      name: "kanban_get_choice",
+      arguments: { task_key: otherTask },
+    });
+    assert.equal(hidden.body.result.isError, true);
+    const own = await mcp(base, tok.body.access_token, "tools/call", {
+      name: "kanban_get_choice",
+      arguments: { task_key: opsTask },
+    });
+    assert.equal(own.body.result.isError, false);
+    const asOther = await mcp(base, tok.body.access_token, "tools/call", {
+      name: "kanban_report",
+      arguments: { title: "Nope", status: "running", agent_name: "other-bot" },
+    });
+    assert.equal(asOther.body.result.isError, true);
+  });
+
+  await withOauth({ sourceTokens }, async ({ base }) => {
+    const reg = await registerClient(base);
+    const page = await authorizePage(base, reg.body.client_id, { challenge: pkcePair().challenge, sessionCookie: session });
+    assert.deepEqual(radioValues(page.html), ["claude-code"]);
+    assert.equal(page.html.includes("grok-bot"), false);
+    for (const source of ["grok-bot", "grok-bot@ops-bot"]) {
+      const denied = await postConsent(base, {
+        resume: page.resume, csrfCookie: page.csrfCookie, sessionCookie: session, source,
+      });
+      assert.equal(denied.status, 400);
+      assert.equal(denied.code, null);
+    }
+  });
+});
+
+test("consent POST rejects a foreign or missing Origin and still accepts the real one", async () => {
+  await withOauth({}, async ({ base }) => {
+    const reg = await registerClient(base);
+    const clientId = reg.body.client_id;
+    const pair = pkcePair();
+    const page = await authorizePage(base, clientId, { challenge: pair.challenge });
+    const evil = await postConsent(base, {
+      resume: page.resume, csrfCookie: page.csrfCookie, sourceKey: CLAUDE_KEY, origin: "https://evil.example",
+    });
+    assert.equal(evil.status, 403);
+    assert.equal(evil.code, null);
+    assert.equal(evil.text.includes(CLAUDE_KEY), false);
+    assert.equal(evil.xfo, "DENY");
+    const missing = await postConsent(base, {
+      resume: page.resume, csrfCookie: page.csrfCookie, sourceKey: CLAUDE_KEY, origin: "",
+    });
+    assert.equal(missing.status, 403);
+    assert.equal(missing.code, null);
+    const ok = await postConsent(base, {
+      resume: page.resume, csrfCookie: page.csrfCookie, sourceKey: CLAUDE_KEY,
+    });
+    assert.equal(ok.status, 302);
+    assert.ok(ok.code);
+    const tok = await exchange(base, { clientId, code: ok.code, verifier: pair.verifier });
+    assert.equal(tok.status, 200);
+  });
+});
+
+test("revoking a source key or a WeCom user kills that OAuth family, and refresh does not extend 30 days", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "akb-oauth-revoke-"));
+  const rotatedKey = "rotated-claude-key-padded-to-32-charsx";
+  let pasteAccess = "";
+  let pasteRefresh = "";
+  let pasteClient = "";
+  let botAccess = "";
+  let botRefresh = "";
+  let botClient = "";
+  await withOauth({ dir }, async ({ base }) => {
+    const reg = await registerClient(base);
+    pasteClient = reg.body.client_id;
+    const pair = pkcePair();
+    const code = await codeFor(base, pasteClient, { verifier: pair.verifier, challenge: pair.challenge, sourceKey: CLAUDE_KEY });
+    const tok = await exchange(base, { clientId: pasteClient, code, verifier: pair.verifier });
+    pasteAccess = tok.body.access_token;
+    pasteRefresh = tok.body.refresh_token;
+    const botReg = await registerClient(base);
+    botClient = botReg.body.client_id;
+    const botPair = pkcePair();
+    const botCode = await codeFor(base, botClient, { verifier: botPair.verifier, challenge: botPair.challenge, sourceKey: BOT_KEY });
+    const botTok = await exchange(base, { clientId: botClient, code: botCode, verifier: botPair.verifier });
+    botAccess = botTok.body.access_token;
+    botRefresh = botTok.body.refresh_token;
+  });
+
+  await withOauth({
+    dir,
+    sourceTokens: `claude-code:${hashToken(rotatedKey)},grok-bot@示例机器人:${hashToken(BOT_KEY)}`,
+  }, async ({ base }) => {
+    assert.equal((await mcp(base, CLAUDE_KEY, "tools/list", {})).status, 401);
+    assert.equal((await mcp(base, rotatedKey, "tools/list", {})).status, 200);
+    assert.equal((await mcp(base, pasteAccess, "tools/list", {})).status, 401);
+    assert.equal((await refresh(base, pasteClient, pasteRefresh)).body.error, "invalid_grant");
+    assert.equal((await mcp(base, botAccess, "tools/list", {})).status, 200);
+    const still = await refresh(base, botClient, botRefresh);
+    assert.equal(still.status, 200);
+    botAccess = still.body.access_token;
+    botRefresh = still.body.refresh_token;
+  });
+  await withOauth({
+    dir,
+    sourceTokens: `claude-code:${hashToken(rotatedKey)},grok-bot@示例机器人:${hashToken(BOT_KEY)}`,
+  }, async ({ base }) => {
+    assert.equal((await mcp(base, botAccess, "tools/list", {})).status, 200);
+  });
+
+  const wecomDir = fs.mkdtempSync(path.join(os.tmpdir(), "akb-oauth-wecom-revoke-"));
+  const fetchImpl = async (url) => {
+    const u = String(url);
+    if (u.includes("/gettoken")) return { json: async () => ({ errcode: 0, access_token: "access-TOKEN-xyz", expires_in: 7200 }) };
+    if (u.includes("/auth/getuserinfo")) return { json: async () => ({ errcode: 0, userid: "QiaoYiFu" }) };
+    throw new Error("unexpected");
+  };
+  let wecomAccess = "";
+  let wecomRefresh = "";
+  let wecomClient = "";
+  await withOauth({ dir: wecomDir, fetchImpl }, async ({ base }) => {
+    const reg = await registerClient(base);
+    wecomClient = reg.body.client_id;
+    const pair = pkcePair();
+    const page = await authorizePage(base, wecomClient, { challenge: pair.challenge });
+    const next = `/kanban/oauth/authorize?resume=${page.resume}`;
+    const start = await fetch(`${base}/kanban/auth/wecom/start?next=${encodeURIComponent(next)}`, { redirect: "manual" });
+    const stateCookie = cookiePair(start, STATE_COOKIE);
+    const state = new URL(start.headers.get("location").replace(/#wechat_redirect$/, "")).searchParams.get("state");
+    const cb = await fetch(`${base}/kanban/auth/wecom/callback?code=c1&state=${state}`, {
+      redirect: "manual",
+      headers: { cookie: stateCookie },
+    });
+    const session = cookiePair(cb, SESSION_COOKIE);
+    const back = await fetch(`${base}${next}`, { headers: { cookie: session } });
+    const post = await postConsent(base, {
+      resume: page.resume,
+      csrfCookie: cookiePair(back, OAUTH_CSRF_COOKIE),
+      sessionCookie: session,
+      source: "claude-code",
+    });
+    const tok = await exchange(base, { clientId: wecomClient, code: post.code, verifier: pair.verifier });
+    assert.equal(tok.status, 200);
+    wecomAccess = tok.body.access_token;
+    wecomRefresh = tok.body.refresh_token;
+  });
+  await withOauth({
+    dir: wecomDir,
+    sourceTokens: `grok-bot@示例机器人:${hashToken(BOT_KEY)}`,
+  }, async ({ base }) => {
+    assert.equal((await refresh(base, wecomClient, wecomRefresh)).body.error, "invalid_grant");
+    assert.equal((await mcp(base, wecomAccess, "tools/list", {})).status, 401);
+  });
+
+  const userDir = fs.mkdtempSync(path.join(os.tmpdir(), "akb-oauth-user-revoke-"));
+  await withOauth({ dir: userDir, fetchImpl }, async ({ base }) => {
+    const reg = await registerClient(base);
+    wecomClient = reg.body.client_id;
+    const pair = pkcePair();
+    const page = await authorizePage(base, wecomClient, { challenge: pair.challenge });
+    const next = `/kanban/oauth/authorize?resume=${page.resume}`;
+    const start = await fetch(`${base}/kanban/auth/wecom/start?next=${encodeURIComponent(next)}`, { redirect: "manual" });
+    const stateCookie = cookiePair(start, STATE_COOKIE);
+    const state = new URL(start.headers.get("location").replace(/#wechat_redirect$/, "")).searchParams.get("state");
+    const cb = await fetch(`${base}/kanban/auth/wecom/callback?code=c1&state=${state}`, {
+      redirect: "manual",
+      headers: { cookie: stateCookie },
+    });
+    const session = cookiePair(cb, SESSION_COOKIE);
+    const back = await fetch(`${base}${next}`, { headers: { cookie: session } });
+    const post = await postConsent(base, {
+      resume: page.resume,
+      csrfCookie: cookiePair(back, OAUTH_CSRF_COOKIE),
+      sessionCookie: session,
+      source: "claude-code",
+    });
+    const tok = await exchange(base, { clientId: wecomClient, code: post.code, verifier: pair.verifier });
+    wecomAccess = tok.body.access_token;
+    wecomRefresh = tok.body.refresh_token;
+    assert.equal((await mcp(base, wecomAccess, "tools/list", {})).status, 200);
+  });
+  await withOauth({ dir: userDir, env: { AKB_WECOM_USERS: "OtherPerson" } }, async ({ base }) => {
+    assert.equal((await refresh(base, wecomClient, wecomRefresh)).body.error, "invalid_grant");
+    assert.equal((await mcp(base, wecomAccess, "tools/list", {})).status, 401);
+    assert.equal((await mcp(base, CLAUDE_KEY, "tools/list", {})).status, 200);
+  });
+
+  let clock = Date.now();
+  const capDir = fs.mkdtempSync(path.join(os.tmpdir(), "akb-oauth-cap-"));
+  await withOauth({ dir: capDir, oauthNow: () => clock }, async ({ base, dir: dataDir }) => {
+    const reg = await registerClient(base);
+    const clientId = reg.body.client_id;
+    const pair = pkcePair();
+    const code = await codeFor(base, clientId, { verifier: pair.verifier, challenge: pair.challenge, sourceKey: CLAUDE_KEY });
+    const tok = await exchange(base, { clientId, code, verifier: pair.verifier });
+    const saved = JSON.parse(fs.readFileSync(path.join(dataDir, "oauth.json"), "utf8"));
+    const cap = Object.values(saved.refresh)[0].grantExp;
+    assert.equal(Object.values(saved.refresh)[0].exp, cap);
+    clock += 29 * 24 * 60 * 60 * 1000;
+    const mid = await refresh(base, clientId, tok.body.refresh_token);
+    assert.equal(mid.status, 200);
+    const after = JSON.parse(fs.readFileSync(path.join(dataDir, "oauth.json"), "utf8"));
+    const exps = Object.values(after.refresh).map((r) => r.exp);
+    assert.ok(exps.length >= 2);
+    assert.ok(exps.every((e) => e === cap));
+    clock = cap - 1000;
+    const near = await refresh(base, clientId, mid.body.refresh_token);
+    assert.equal(near.status, 200);
+    clock = cap + 1000;
+    assert.equal((await refresh(base, clientId, near.body.refresh_token)).body.error, "invalid_grant");
+    assert.equal((await mcp(base, near.body.access_token, "tools/list", {})).status, 401);
+    assert.equal((await mcp(base, CLAUDE_KEY, "tools/list", {})).status, 200);
+  });
+});
+
+test("authorize is rate limited, pending stays in memory, and a restart drops it", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "akb-oauth-pending-"));
+  let resume = "";
+  await withOauth({ dir }, async ({ base, dir: dataDir }) => {
+    const reg = await registerClient(base);
+    const clientId = reg.body.client_id;
+    const { challenge } = pkcePair();
+    const pages = [];
+    for (let i = 0; i < 6; i++) {
+      const page = await authorizePage(base, clientId, { challenge });
+      assert.equal(page.status, 200, page.html.slice(0, 120));
+      pages.push(page);
+    }
+    const oldest = await fetch(`${base}/kanban/oauth/authorize?resume=${pages[0].resume}`, { redirect: "manual" });
+    assert.equal(oldest.status, 400);
+    const newest = await fetch(`${base}/kanban/oauth/authorize?resume=${pages[5].resume}`, { redirect: "manual" });
+    assert.equal(newest.status, 200);
+    resume = pages[5].resume;
+    const saved = JSON.parse(fs.readFileSync(path.join(dataDir, "oauth.json"), "utf8"));
+    assert.equal(saved.pending, undefined);
+    assert.equal(JSON.stringify(saved).includes(resume), false);
+    assert.ok(fs.statSync(path.join(dataDir, "oauth.json")).size < 20000);
+
+    let blocked = null;
+    for (let i = 0; i < 8; i++) {
+      const page = await authorizePage(base, clientId, { challenge });
+      if (page.status === 429) {
+        blocked = page;
+        break;
+      }
+    }
+    assert.equal(blocked && blocked.status, 429);
+    assert.match(blocked.html, /slow_down/);
+    const other = await registerClient(base);
+    const still = await authorizePage(base, other.body.client_id, { challenge: pkcePair().challenge });
+    assert.equal(still.status, 200);
+    const after = JSON.parse(fs.readFileSync(path.join(dataDir, "oauth.json"), "utf8"));
+    assert.equal(after.pending, undefined);
+    assert.ok(fs.statSync(path.join(dataDir, "oauth.json")).size < 20000);
+  });
+  await withOauth({ dir }, async ({ base }) => {
+    const again = await fetch(`${base}/kanban/oauth/authorize?resume=${resume}`, { redirect: "manual" });
+    assert.equal(again.status, 400);
+  });
+
+  await withOauth({}, async ({ base, dir: dataDir }) => {
+    let allowed = 0;
+    let limited = 0;
+    for (let i = 0; i < 40; i++) {
+      const res = await fetch(`${base}/kanban/oauth/authorize?response_type=code&client_id=no-such-client&redirect_uri=${encodeURIComponent(REDIRECT)}`, {
+        headers: { "x-forwarded-for": `203.0.113.${i}` },
+      });
+      if (res.status === 429) limited++;
+      else allowed++;
+      assert.notEqual(res.status, 200);
+    }
+    assert.equal(allowed, 30);
+    assert.equal(limited, 10);
+    assert.ok(fs.statSync(path.join(dataDir, "oauth.json")).size < 20000);
+  });
+});
+
+test("X-Forwarded-For is ignored unless the socket is a configured trusted proxy", async () => {
+  async function registrations(env, n) {
+    let created = 0;
+    await withOauth({ env }, async ({ base }) => {
+      for (let i = 0; i < n; i++) {
+        const res = await registerClient(base, [REDIRECT], {}, { "x-forwarded-for": `198.51.100.${i}` });
+        if (res.status === 201) created++;
+        else assert.equal(res.status, 429);
+      }
+    });
+    return created;
+  }
+  assert.equal(await registrations({}, 40), 30);
+  assert.equal(await registrations({ AKB_TRUST_PROXY: "10.9.9.9" }, 40), 30);
+  assert.equal(await registrations({ AKB_TRUST_PROXY: "127.0.0.1" }, 40), 40);
+});
+
+test("client cap eviction skips a client that still has a live refresh token", { timeout: 180_000 }, async () => {
+  await withOauth({ env: { AKB_TRUST_PROXY: "127.0.0.1" } }, async ({ base, dir }) => {
+    const reg = await registerClient(base);
+    const clientId = reg.body.client_id;
+    const pair = pkcePair();
+    const code = await codeFor(base, clientId, { verifier: pair.verifier, challenge: pair.challenge, sourceKey: CLAUDE_KEY });
+    const tok = await exchange(base, { clientId, code, verifier: pair.verifier });
+    const extras = [];
+    for (let i = 0; i < 420; i++) {
+      const xff = `198.51.${Math.floor(i / 200)}.${(i % 200) + 1}`;
+      const created = await registerClient(base, [REDIRECT], { client_name: `x${i}` }, { "x-forwarded-for": xff });
+      assert.equal(created.status, 201, created.text.slice(0, 160));
+      extras.push(created.body.client_id);
+    }
+    const saved = JSON.parse(fs.readFileSync(path.join(dir, "oauth.json"), "utf8"));
+    assert.equal(Object.keys(saved.clients).length, 400);
+    assert.ok(saved.clients[clientId]);
+    assert.equal(saved.clients[extras[0]], undefined);
+    assert.ok(saved.clients[extras[extras.length - 1]]);
+    const next = await refresh(base, clientId, tok.body.refresh_token);
+    assert.equal(next.status, 200, next.text.slice(0, 200));
+    assert.equal((await mcp(base, next.body.access_token, "tools/list", {})).status, 200);
   });
 });
