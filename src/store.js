@@ -57,6 +57,23 @@ function cleanLinks(links) {
     .map((l) => ({ url: l.url.slice(0, 1000), label: cleanString(l.label, 80) || undefined }));
 }
 
+// Needs-you option buttons: each needs a non-empty label and value.
+function cleanOptions(options) {
+  if (!Array.isArray(options)) return undefined;
+  return options
+    .map((o) => (o && typeof o === "object" ? { label: cleanString(o.label, 80), value: cleanString(o.value, 200) } : null))
+    .filter((o) => o && o.label && o.value)
+    .slice(0, 12);
+}
+
+const CHOICE_SOURCES = new Set(["board", "chat"]);
+
+function cleanChoiceSource(source, fallback = "board") {
+  const s = cleanString(source, 40);
+  if (s && CHOICE_SOURCES.has(s)) return s;
+  return fallback;
+}
+
 export class Store extends EventEmitter {
   constructor({ dataDir } = {}) {
     super();
@@ -191,6 +208,37 @@ export class Store extends EventEmitter {
       task.meta = { ...task.meta, ...input.meta };
     }
 
+    // Optional needs-you prompt fields (all omitable; old cards stay unchanged).
+    const options = cleanOptions(input.options);
+    if (options) task.options = options;
+    const question = cleanString(input.question, 500);
+    if (question) task.question = question;
+    const background = cleanString(input.background, 4000);
+    if (background) task.background = background;
+
+    // Chat-side resolution: same first-wins rule as a board click.
+    if (input.choice_resolved && typeof input.choice_resolved === "object" && !task.choice) {
+      const value = cleanString(input.choice_resolved.value, 200);
+      if (value) {
+        const allowed = task.options?.length ? task.options.some((o) => o.value === value) : true;
+        if (allowed) {
+          task.choice = {
+            value,
+            at: now,
+            source: cleanChoiceSource(input.choice_resolved.source, "chat"),
+          };
+          task.events.push({
+            id: randomUUID(),
+            at: now,
+            status: null,
+            message: `Chose “${value}” (${task.choice.source})`,
+            type: "choice",
+          });
+          if (task.events.length > MAX_EVENTS) task.events.splice(0, task.events.length - MAX_EVENTS);
+        }
+      }
+    }
+
     const parent = parseRef(input.parent);
     let oldParentKey = null;
     if (parent) {
@@ -255,6 +303,36 @@ export class Store extends EventEmitter {
     this.scheduleSave();
     this.emit("change", task);
     return task;
+  }
+
+  // Board click on a needs-you option. First choice wins (chat or board); repeats are no-ops.
+  // Nothing is sent to the agent or the relay — bots poll via kanban_get_choice.
+  recordChoice(key, { value, source = "board", by } = {}) {
+    const task = this.tasks.get(key);
+    if (!task || task.placeholder) return null;
+    if (task.choice) return { task, changed: false };
+    const cleaned = cleanString(value, 200);
+    if (!cleaned) return null;
+    if (task.options?.length && !task.options.some((o) => o.value === cleaned)) return null;
+    const at = new Date().toISOString();
+    task.choice = {
+      value: cleaned,
+      at,
+      source: cleanChoiceSource(source, "board"),
+      by: cleanString(by, 80) || null,
+    };
+    task.events.push({
+      id: randomUUID(),
+      at,
+      status: null,
+      message: `Chose “${cleaned}” (${task.choice.source})`,
+      type: "choice",
+    });
+    if (task.events.length > MAX_EVENTS) task.events.splice(0, task.events.length - MAX_EVENTS);
+    if (at > task.updatedAt) task.updatedAt = at;
+    this.scheduleSave();
+    this.emit("change", task);
+    return { task, changed: true };
   }
 
   updateRequests({ source } = {}) {

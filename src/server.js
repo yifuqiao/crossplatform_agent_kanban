@@ -453,6 +453,23 @@ export function createServer({
         return send(res, 200, { ok: true, updateRequest: task.updateRequest });
       }
 
+      // Needs-you option click: record the choice on the card. Opening bots poll via kanban_get_choice;
+      // the board never POSTs to the relay or any agent.
+      const choose = url.pathname.match(/^\/api\/tasks\/([^/]+)\/choice$/);
+      if (choose) {
+        if (req.method !== "POST") return send(res, 405, { error: "method not allowed" }, { allow: "POST" });
+        const key = decodeURIComponent(choose[1]);
+        const task = store.get(key);
+        if (!task) return send(res, 404, { error: "not found" });
+        if (task.placeholder) return send(res, 409, { error: "this card only groups other tasks; choose on one of them" });
+        const body = parseJson(await readBody(req));
+        const value = body?.value;
+        if (value == null || value === "") return send(res, 400, { error: "value required" });
+        const result = store.recordChoice(key, { value: String(value), source: "board", by: sessionOk(req)?.uid });
+        if (!result) return send(res, 400, { error: "invalid choice" });
+        return send(res, 200, { ok: true, choice: task.choice, changed: result.changed });
+      }
+
       const one = url.pathname.match(/^\/api\/tasks\/(.+)$/);
       if (one) {
         const key = decodeURIComponent(one[1]);
