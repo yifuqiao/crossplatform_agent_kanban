@@ -108,15 +108,18 @@ export function scopeEventToKey(ev, principal, store) {
   if (principal.agentName && ev.agent_name != null && ev.agent_name !== principal.agentName) {
     throw new Error(`this key reports as agent "${principal.agentName}"`);
   }
-  const sameBot = (t) => !principal.agentName || !t.agentName || t.agentName === principal.agentName;
+  // A bot-bound key writes only cards already carrying its bot name; it may nest under its
+  // source's unassigned cards (e.g. a relay task) without changing them.
+  const ownBot = (t) => !principal.agentName || t.agentName === principal.agentName;
+  const nestable = (t) => !principal.agentName || !t.agentName || t.agentName === principal.agentName;
   // Same trimming as store.apply, so the card checked here is the card that gets written.
   const key = `${ref.source}:${String(ref.externalId).trim().slice(0, 200)}`;
   const card = store.get(key);
-  if (card && (card.createdBy || !sameBot(card))) throw new Error(`card ${key} is not writable with this key`);
+  if (card && (card.createdBy || !ownBot(card))) throw new Error(`card ${key} is not writable with this key`);
   if (ev.parent != null) {
     const parent = parseRef(ev.parent);
     const parentCard = parent && store.get(`${parent.source}:${parent.externalId}`);
-    if (!parent || !allowed(parent) || (parentCard && !sameBot(parentCard))) {
+    if (!parent || !allowed(parent) || (parentCard && !nestable(parentCard))) {
       throw new Error(`parent must be a "${principal.source}" card`);
     }
   }

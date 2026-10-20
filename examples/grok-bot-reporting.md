@@ -11,8 +11,9 @@ summaries. With them, every inner step gets its own card, status and links.
 - A `grok-bot` source key, sent as `Authorization: Bearer <key>`. The board admin makes one with
   `akb token-new --source grok-bot` (add `--agent <bot>` to bind it to one bot) and hands it over
   privately. Keep it out of task text and chat. Do not give Grok Bot the admin `AKB_TOKEN`.
-  The key can only write `grok-bot:*` cards (its bot's, when bound) and only nest them under
-  `grok-bot:*` cards.
+  The key can only write `grok-bot:*` cards and only nest them under `grok-bot:*` cards. A key bound
+  to a bot writes only cards carrying that bot's name; it can nest under the relay task's card but
+  not change it, so use an unbound key if the bot should also close the relay task's own card.
 
 ## The task's own card
 

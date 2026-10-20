@@ -416,6 +416,16 @@ test("a source key cannot write other sources, other bots, or MCP-created cards"
     assert.equal(res.status, 200);
     assert.equal(store.get("grok-bot:mine").agentName, "示例机器人");
 
+    // A bot-bound key cannot claim an unassigned card (e.g. a relay root), but can nest under it.
+    store.apply({ key: "grok-bot:relay1", title: "Relay task", status: "running" });
+    res = await postEvents(base, BOT_KEY, { key: "grok-bot:relay1", status: "done", title: "hijack" });
+    assert.equal(res.status, 400);
+    assert.equal(store.get("grok-bot:relay1").status, "running");
+    assert.equal(store.get("grok-bot:relay1").agentName, undefined);
+    res = await postEvents(base, BOT_KEY, { key: "grok-bot:relay1/step", parent: "grok-bot:relay1", status: "running" });
+    assert.equal(res.status, 200);
+    assert.equal(store.get("grok-bot:relay1/step").parentKey, "grok-bot:relay1");
+
     const mixed = await postEvents(base, CLAUDE_KEY, [{ key: "claude-code:ok", status: "running" }, { key: "cursor:x", status: "running" }]);
     assert.equal(mixed.status, 207);
     assert.equal(store.get("cursor:x"), null);
