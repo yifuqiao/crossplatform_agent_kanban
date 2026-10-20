@@ -71,6 +71,16 @@ MCP 地址是 `https://relay.onetopway.com/kanban/mcp`，Cursor webhook 是 `htt
 并让环境的网络策略放行看板域名。这样会话卡的状态（运行中 / 等你 / 一轮结束 / 子 agent）由 hook 自动更新，不再依赖 Claude 记得调 `kanban_report`。
 hook 在后台进程里发送，失败不会影响会话。
 
+**所有仓库都自动上报**：上面的 hook 只在打开本仓库时生效。想让云端环境里每个会话（不管开的是哪个仓库）都自动上报，
+在云端环境的 Setup script 里加一行：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/yifuqiao/crossplatform_agent_kanban/main/scripts/install-cloud-hooks.sh | bash
+```
+
+它从 `main` 拉下 `akb`（无依赖，Node 22），把 hook 写进用户级 `~/.claude/settings.json`（保留已有设置，重复运行不会重复添加）。
+打开的仓库自己已经配了看板 hook（例如本仓库）时，用户级 hook 自动跳过，一个会话只出一张卡。钥匙仍然只从环境变量读，不写进磁盘；任何一步失败都只打印提示，不会让 setup 失败。
+
 ### Codex CLI
 
 在 `~/.codex/config.toml` 加一行（见 [`examples/codex-config.toml`](examples/codex-config.toml)）：
