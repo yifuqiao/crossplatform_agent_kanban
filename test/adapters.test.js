@@ -8,7 +8,7 @@ import { codexEvents } from "../src/adapters/codex.js";
 
 function feed(store, adapter, payloads, env = {}) {
   for (const p of payloads) {
-    const { rootKey, events } = adapter(p);
+    const { rootKey, events } = adapter(p, env);
     for (const ev of applyEnvLinks(events, rootKey, env)) store.apply(ev);
   }
 }
@@ -65,4 +65,18 @@ test("Cursor hooks map to a conversation card and answer beforeSubmitPrompt", ()
   assert.equal(t.status, "review");
   assert.deepEqual(cursorHookResponse({ hook_event_name: "beforeSubmitPrompt" }), { continue: true });
   assert.deepEqual(cursorHookResponse({ hook_event_name: "stop" }), {});
+});
+
+test("Claude Code on the web keys the card by the claude.ai session and links to it", () => {
+  const s = new Store();
+  const env = { CLAUDE_CODE_REMOTE_SESSION_ID: "cse_01V1RqqeQoEuMwq6Brf3XUMC" };
+  feed(s, claudeCodeEvents, [
+    { session_id: "8bc88d66", cwd: "/home/user/repo", hook_event_name: "UserPromptSubmit", prompt: "Fix the board data" },
+    { session_id: "8bc88d66", cwd: "/home/user/repo", hook_event_name: "PreToolUse", tool_name: "Agent", tool_use_id: "tu9", tool_input: { description: "Search code" } },
+  ], env);
+  const card = s.get("claude-code-web:session_01V1RqqeQoEuMwq6Brf3XUMC");
+  assert.equal(card.title, "Fix the board data");
+  assert.equal(card.kind, "cloud");
+  assert.equal(card.url, "https://claude.ai/code/session_01V1RqqeQoEuMwq6Brf3XUMC");
+  assert.equal(s.children(card.key)[0].title, "Search code");
 });

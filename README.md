@@ -60,6 +60,11 @@ MCP 地址是 `https://relay.onetopway.com/kanban/mcp`，Cursor webhook 是 `htt
 | `Stop` | → Review（这一轮做完了） |
 | `SessionEnd` | → Done |
 
+**Claude Code on the web（claude.ai/code 云端会话）**：本仓库自带 [`.claude/settings.json`](.claude/settings.json)，在这个仓库里开的每个会话都会自动上报。
+只需在云端环境设置（会话标题栏的环境菜单 → Edit）里加两个环境变量：`AKB_URL=https://relay.onetopway.com/kanban` 和 `AKB_TOKEN`（看板 token），新会话生效。
+云端会话按 `claude.ai/code/session_…` 建卡并链接回会话页面；从这个会话提交给 Grok Bot 的任务也会挂在同一张卡下面。
+hook 在后台进程里发送（自动走沙箱的 HTTPS 代理），不会拖慢 Claude。
+
 ### Codex CLI
 
 在 `~/.codex/config.toml` 加一行（见 [`examples/codex-config.toml`](examples/codex-config.toml)）：

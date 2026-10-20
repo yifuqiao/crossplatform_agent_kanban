@@ -5,14 +5,21 @@ const SUBAGENT_TOOLS = new Set(["Task", "Agent"]);
 
 // Maps one Claude Code hook payload (stdin JSON) to board events.
 // Register with: akb hook claude-code  (see examples/claude-code-settings.json)
-export function claudeCodeEvents(payload) {
-  const sessionId = payload?.session_id;
-  if (!sessionId) return { rootKey: null, events: [] };
-  const rootKey = `${SOURCE}:${sessionId}`;
+export function claudeCodeEvents(payload, env = process.env) {
+  if (!payload?.session_id) return { rootKey: null, events: [] };
+  // Claude Code on the web runs with CLAUDE_CODE_REMOTE_SESSION_ID=cse_X; its page is
+  // claude.ai/code/session_X. Keying the card by that id also merges it with relay tasks
+  // submitted from the same session (their source_thread is the session id or URL).
+  const remote = /^cse_([A-Za-z0-9]+)$/.exec(env.CLAUDE_CODE_REMOTE_SESSION_ID || "");
+  const sessionId = remote ? `session_${remote[1]}` : payload.session_id;
+  const source = remote ? "claude-code-web" : SOURCE;
+  const rootKey = `${source}:${sessionId}`;
   const base = {
-    source: SOURCE,
+    source,
     external_id: sessionId,
     cwd: payload.cwd,
+    kind: remote ? "cloud" : undefined,
+    url: remote ? `https://claude.ai/code/${sessionId}` : undefined,
     meta: { transcript_path: payload.transcript_path, permission_mode: payload.permission_mode },
   };
   const name = payload.hook_event_name;
@@ -20,7 +27,7 @@ export function claudeCodeEvents(payload) {
 
   switch (name) {
     case "SessionStart":
-      events.push({ ...base, status: "review", title: `Claude Code · ${folder(payload.cwd)}`, title_mode: "default", message: `Session ${payload.source || "started"}`, type: "session" });
+      events.push({ ...base, status: "review", title: `Claude Code${remote ? " (web)" : ""} · ${folder(payload.cwd)}`, title_mode: "default", message: `Session ${payload.source || "started"}`, type: "session" });
       break;
     case "UserPromptSubmit":
       events.push({ ...base, status: "running", title: oneLine(payload.prompt, 100) || undefined, title_mode: "first", message: `Prompt: ${oneLine(payload.prompt, 400)}`, type: "prompt" });
@@ -30,7 +37,7 @@ export function claudeCodeEvents(payload) {
         const input = payload.tool_input || {};
         events.push({ ...base, status: "running" });
         events.push({
-          source: SOURCE,
+          source,
           external_id: `${sessionId}/${payload.tool_use_id || oneLine(input.description, 60)}`,
           parent: rootKey,
           kind: "cli",
@@ -47,7 +54,7 @@ export function claudeCodeEvents(payload) {
     case "PostToolUse":
       if (SUBAGENT_TOOLS.has(payload.tool_name) && payload.tool_use_id) {
         events.push({
-          source: SOURCE,
+          source,
           external_id: `${sessionId}/${payload.tool_use_id}`,
           parent: rootKey,
           status: "done",

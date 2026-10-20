@@ -102,3 +102,14 @@ test("task url accepts only http/https schemes", () => {
   s.apply({ key: "u:1", url: "http://example.com/also" });
   assert.equal(s.get("u:1").url, "http://example.com/also");
 });
+
+test("a late-arriving older status does not overwrite a newer one", () => {
+  const s = new Store();
+  s.apply({ key: "claude-code:s", status: "review", at: "2026-10-20T09:00:02Z" });
+  s.apply({ key: "claude-code:s", status: "running", at: "2026-10-20T09:00:01Z", message: "Bash · ls" });
+  const t = s.get("claude-code:s");
+  assert.equal(t.status, "review");
+  assert.equal(t.events.at(-1).message, "Bash · ls");
+  s.apply({ key: "claude-code:s", status: "running", at: "2026-10-20T09:00:03Z" });
+  assert.equal(s.get("claude-code:s").status, "running");
+});

@@ -189,7 +189,10 @@ export class Store extends EventEmitter {
       }
     }
 
-    const statusChanged = Boolean(status && status !== task.status);
+    // Ignore a status older than the one already shown (events can arrive out of order).
+    const stale = Boolean(task.statusAt && now < task.statusAt);
+    const statusChanged = Boolean(status && status !== task.status && !stale);
+    if (status && !stale) task.statusAt = now;
     if (statusChanged) {
       task.status = status;
       if (status === "running" && !task.startedAt) task.startedAt = now;

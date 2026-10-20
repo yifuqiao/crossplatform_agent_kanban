@@ -4,6 +4,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
+import { fileURLToPath } from "node:url";
 import { Store } from "./store.js";
 import { createServer, pollersFromEnv, startPollers } from "./server.js";
 import { applyEnvLinks } from "./adapters/common.js";
@@ -95,11 +96,38 @@ async function cmdHook(f) {
     const raw = which === "codex" && f._[2] ? f._.slice(2).join(" ") : await readStdin();
     payload = JSON.parse(raw);
     const { rootKey, events } = adapter(payload);
-    if (events.length) await post("/api/events", applyEnvLinks(events, rootKey), 1500);
+    // Stamp now: the board orders statuses by this, since background sends can arrive out of order.
+    const at = new Date().toISOString();
+    if (events.length) sendInBackground(applyEnvLinks(events, rootKey).map((ev) => ({ at, ...ev })));
   } catch (err) {
     if (process.env.AKB_DEBUG) console.error(`[akb] hook ${which}: ${err.message}`);
   }
   if (which === "cursor") process.stdout.write(JSON.stringify(cursorHookResponse(payload)));
+}
+
+// Hand the events to a detached `akb send` so the agent never waits on the network
+// (a remote board can be seconds away).
+function sendInBackground(events) {
+  const env = { ...process.env };
+  // Node's fetch ignores HTTPS_PROXY unless told to; cloud sandboxes route egress through one.
+  if ((env.HTTPS_PROXY || env.https_proxy) && !env.NODE_USE_ENV_PROXY) env.NODE_USE_ENV_PROXY = "1";
+  const child = spawn(process.execPath, ["--no-warnings", fileURLToPath(import.meta.url), "send"], {
+    detached: true,
+    env,
+    stdio: ["pipe", "ignore", env.AKB_DEBUG ? "inherit" : "ignore"],
+  });
+  child.on("error", () => {});
+  child.stdin.on("error", () => {});
+  child.stdin.end(JSON.stringify(events));
+  child.unref();
+}
+
+async function cmdSend() {
+  try {
+    await post("/api/events", JSON.parse(await readStdin()), 15000);
+  } catch (err) {
+    if (process.env.AKB_DEBUG) console.error(`[akb] send: ${err.message}`);
+  }
 }
 
 async function cmdRun(f) {
@@ -181,7 +209,7 @@ async function cmdMcp() {
 }
 
 const f = flags(process.argv.slice(2));
-const commands = { serve: cmdServe, hook: cmdHook, run: cmdRun, report: cmdReport, list: cmdList, mcp: cmdMcp };
+const commands = { serve: cmdServe, hook: cmdHook, send: cmdSend, run: cmdRun, report: cmdReport, list: cmdList, mcp: cmdMcp };
 const fn = commands[f._[0]];
 if (!fn) {
   console.log(USAGE);
