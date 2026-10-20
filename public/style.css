@@ -1,6 +1,6 @@
 :root {
   --bg: #f5f6f8; --panel: #ffffff; --col: #eceef2; --text: #1d2129; --muted: #6b7280; --line: #dde1e7;
-  --queued: #8a94a6; --running: #2f6fed; --waiting: #d97706; --review: #7c3aed; --done: #16a34a; --failed: #dc2626;
+  --queued: #8a94a6; --planning: #0891b2; --running: #2f6fed; --waiting: #d97706; --review: #7c3aed; --done: #16a34a; --failed: #dc2626;
   font: 14px/1.45 system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
 }
 @media (prefers-color-scheme: dark) {
@@ -18,7 +18,7 @@ body { margin: 0; background: var(--bg); color: var(--text); }
 .conn { margin-left: auto; color: var(--failed); }
 .conn.live { color: var(--done); }
 
-.board { display: grid; grid-template-columns: repeat(6, minmax(220px, 1fr)); gap: 12px; padding: 16px; overflow-x: auto; min-height: calc(100vh - 56px); align-items: start; }
+.board { display: grid; grid-template-columns: repeat(7, minmax(200px, 1fr)); gap: 12px; padding: 16px; overflow-x: auto; min-height: calc(100vh - 56px); align-items: start; }
 .column { background: var(--col); border-radius: 10px; padding: 8px; min-height: 120px; }
 .column h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; margin: 4px 6px 10px; display: flex; justify-content: space-between; color: var(--muted); }
 .column h2 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }

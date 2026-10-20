@@ -6,6 +6,7 @@ import { timingSafeEqual } from "node:crypto";
 import { Store, publicTask } from "./store.js";
 import { COLUMNS } from "./status.js";
 import { handleMcp } from "./mcp.js";
+import { matchSourceToken, parseSourceTokens } from "./source-tokens.js";
 import { cursorAgentEvent, verifyCursorWebhook, createCursorCloudPoller } from "./pollers/cursor-cloud.js";
 import { createGrokRelayPoller } from "./pollers/grok-relay.js";
 import {
@@ -144,6 +145,7 @@ function escapeHtml(s) {
 export function createServer({
   store = new Store(),
   token = process.env.AKB_TOKEN,
+  sourceTokens = process.env.AKB_SOURCE_TOKENS,
   cursorWebhookSecret = process.env.CURSOR_WEBHOOK_SECRET,
   basePath = process.env.AKB_BASE_PATH,
   env = process.env,
@@ -151,6 +153,8 @@ export function createServer({
   dataDir = dataDirFromStore(store) || env.AKB_DATA_DIR || null,
 } = {}) {
   const base = (basePath || "").replace(/\/+$/, "");
+  // Per-source keys: hashes only, MCP only. Bad config fails at startup rather than silently.
+  const sourceEntries = parseSourceTokens(sourceTokens);
   const clients = new Set();
   const broadcast = (event, data) => {
     const frame = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
@@ -395,19 +399,28 @@ export function createServer({
         return send(res, 200, { ok: true });
       }
 
-      if (!authOk(req, url)) return send(res, 401, { error: "unauthorized" });
-      if (req.method !== "GET" && !originOk(req)) return send(res, 403, { error: "cross-origin write refused" });
-
+      // MCP also accepts per-source keys (Authorization header only); they report as their bound source.
       if (url.pathname === "/mcp") {
+        let principal = authOk(req, url) ? undefined : null;
+        if (principal === null) {
+          const header = req.headers.authorization || "";
+          const entry = header.startsWith("Bearer ") ? matchSourceToken(header.slice(7), sourceEntries) : null;
+          if (!entry) return send(res, 401, { error: "unauthorized" });
+          principal = { source: entry.source, agentName: entry.agentName };
+        }
+        if (req.method !== "GET" && !originOk(req)) return send(res, 403, { error: "cross-origin write refused" });
         if (req.method !== "POST") return send(res, 405, { error: "POST JSON-RPC messages to /mcp" }, { allow: "POST" });
         const msg = parseJson(await readBody(req));
         if (Array.isArray(msg)) {
-          const out = msg.map((m) => handleMcp(store, m)).filter(Boolean);
+          const out = msg.map((m) => handleMcp(store, m, principal)).filter(Boolean);
           return out.length ? send(res, 200, out) : send(res, 202);
         }
-        const out = handleMcp(store, msg);
+        const out = handleMcp(store, msg, principal);
         return out ? send(res, 200, out) : send(res, 202);
       }
+
+      if (!authOk(req, url)) return send(res, 401, { error: "unauthorized" });
+      if (req.method !== "GET" && !originOk(req)) return send(res, 403, { error: "cross-origin write refused" });
 
       if (url.pathname === "/api/stream" && req.method === "GET") {
         res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store", connection: "keep-alive" });

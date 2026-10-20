@@ -2,7 +2,7 @@ const SOURCE_COLORS = {
   "claude-code": "#d97757", "claude-chat": "#c96442", codex: "#10a37f", chatgpt: "#0f8f6f",
   cursor: "#3b3b3b", "cursor-cli": "#555", "cursor-cloud": "#6b5bd6", "grok-bot": "#111827", "grok-chat": "#374151",
 };
-const STATUS_LABEL = { queued: "Queued", running: "Running", waiting: "Needs you", review: "Review", done: "Done", failed: "Failed" };
+const STATUS_LABEL = { queued: "Queued", planning: "规划中", running: "Running", waiting: "Needs you", review: "Review", done: "Done", failed: "Failed" };
 
 const params = new URLSearchParams(location.search);
 let token = params.get("token");
@@ -59,7 +59,7 @@ function descendants(key, out = []) {
 // (e.g. a relay task Grok Bot never reported on). The relay still calls them open; we flag them.
 function staleReason(t) {
   if (t.meta?.superseded_by) return "Superseded";
-  if (t.status !== "queued" && t.status !== "running") return null;
+  if (t.status !== "queued" && t.status !== "planning" && t.status !== "running") return null;
   const last = [t, ...descendants(t.key)].reduce((m, d) => (d.updatedAt > m ? d.updatedAt : m), t.updatedAt);
   return Date.now() - Date.parse(last) > STALE_MS ? `No update for ${ago(last)}` : null;
 }
@@ -67,12 +67,15 @@ function staleReason(t) {
 function matches(t) {
   if (state.hidden.has(t.source)) return false;
   if (!state.query) return true;
-  const hay = `${t.title} ${t.summary || ""} ${t.source} ${t.cwd || ""}`.toLowerCase();
+  const hay = `${t.title} ${t.summary || ""} ${t.source} ${t.agentName || ""} ${t.cwd || ""}`.toLowerCase();
   return hay.includes(state.query);
 }
 
-function badge(source) {
-  return el("span", { class: "badge", style: `--b:${SOURCE_COLORS[source] || "#64748b"}` }, source);
+// "grok-bot · ops-bot" when the card names its bot; just the source otherwise.
+const who = (t) => (t.agentName ? `${t.source} · ${t.agentName}` : t.source);
+
+function badge(source, agentName) {
+  return el("span", { class: "badge", style: `--b:${SOURCE_COLORS[source] || "#64748b"}` }, agentName ? `${source} · ${agentName}` : source);
 }
 
 function tree(key, depth = 0) {
@@ -83,7 +86,7 @@ function tree(key, depth = 0) {
       el("div", { class: "row", title: c.summary || c.title, onclick: (e) => { e.stopPropagation(); openTask(c.key); } },
         el("span", { class: `sdot ${c.status}`, style: `--c:var(--${c.status})` }),
         el("span", { class: "name" }, c.title),
-        el("span", { class: "src", title: STATUS_LABEL[c.status] }, c.source)),
+        el("span", { class: "src", title: STATUS_LABEL[c.status] }, who(c))),
       tree(c.key, depth + 1))));
 }
 
@@ -97,7 +100,7 @@ function card(t) {
   const parent = state.flat && t.parentKey ? state.tasks.get(t.parentKey) : null;
   const stale = staleReason(t);
   return el("article", { class: `card${attention ? " attention" : ""}${stale ? " stale" : ""}`, style: `--c:var(--${t.status})`, onclick: () => openTask(t.key) },
-    el("div", { class: "top" }, badge(t.source), t.kind && el("span", {}, t.kind), stale && el("span", { class: "flag" }, stale), el("span", { class: "time", title: t.updatedAt }, ago(t.updatedAt))),
+    el("div", { class: "top" }, badge(t.source, t.agentName), t.kind && el("span", {}, t.kind), stale && el("span", { class: "flag" }, stale), el("span", { class: "time", title: t.updatedAt }, ago(t.updatedAt))),
     parent && el("div", { class: "last" }, `↳ ${parent.title}`),
     el("div", { class: "title" }, t.title),
     t.summary && el("div", { class: "summary" }, t.summary),
@@ -160,12 +163,12 @@ function renderDetail() {
   const t = state.tasks.get(state.open);
   if (!t) return void ($("drawer").hidden = true);
   const parent = t.parentKey && state.tasks.get(t.parentKey);
-  const meta = [["Status", STATUS_LABEL[t.status]], ["Source", t.source], ["Kind", t.kind], ["Key", t.key], ["Folder", t.cwd],
+  const meta = [["Status", STATUS_LABEL[t.status]], ["Source", t.source], ["Agent", t.agentName], ["Kind", t.kind], ["Key", t.key], ["Folder", t.cwd],
     ["Started", t.startedAt && new Date(t.startedAt).toLocaleString()], ["Updated", new Date(t.updatedAt).toLocaleString()],
     ...Object.entries(t.meta || {}).filter(([, v]) => v != null && typeof v !== "object").map(([k, v]) => [k, String(v)])].filter(([, v]) => v);
   const links = [...(t.url ? [{ url: t.url, label: "Open" }] : []), ...(t.links || [])];
   $("detail").replaceChildren(...[
-    el("div", {}, badge(t.source)),
+    el("div", {}, badge(t.source, t.agentName)),
     el("h3", {}, t.title),
     parent && el("div", { class: "last" }, "Part of ", el("a", { href: "#", onclick: (e) => { e.preventDefault(); openTask(parent.key); } }, parent.title)),
     t.summary && el("p", {}, t.summary),

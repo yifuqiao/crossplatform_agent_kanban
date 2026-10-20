@@ -36,8 +36,9 @@ MCP 地址是 `https://relay.onetopway.com/kanban/mcp`，Cursor webhook 是 `htt
 
 ## 看板怎么读
 
-- 六列：**Queued**、**Running**、**Needs you**（等你批准/回答）、**Review**（一轮做完，等你看结果或下一句话）、**Done**、**Failed**。
+- 七列：**Queued**、**规划中**（planning：在想方案、还没动手）、**Running**、**Needs you**（等你批准/回答）、**Review**（一轮做完，等你看结果或下一句话）、**Done**、**Failed**。
 - 只有顶层任务是卡片；它发起的活动以**树**的形式显示在卡片里（可以多层：Grok 任务 → 转交的 bot → Cursor cloud agent）。
+- 卡片标签显示来源；上报时带了 `agent_name` 的，显示成「grok-bot · ops-bot」，详情页也有 Agent 一栏。
 - 卡片下方的小标签汇总子活动状态（例如 `2 Running · 1 Needs you`）。**任何一层子活动在等你，整张卡会被橙色描边**，即使父任务本身还在 Running。
 - 勾选 “Sub-tasks as cards” 可以把子活动也平铺成独立卡片，按各自状态分列。
 - 点卡片看时间线、链接（PR、Cursor agent 页面）、元数据和完整的嵌套树。
@@ -122,11 +123,32 @@ relay 按调用方 key 隔离任务，所以每个提交任务的平台给一个
 
 看板在 `/mcp` 提供 MCP 服务（Streamable HTTP，JSON 响应），三个工具：
 
-- `kanban_report` — 新建或更新卡片（`status`、`title`、`note`、`summary`、`links`、`parent_key`）；返回 `task_key`，之后用它更新。
+- `kanban_report` — 新建或更新卡片（`status`、`title`、`note`、`summary`、`links`、`parent_key`、`agent_name`）；返回 `task_key`，之后用它更新。`status` 可以是 `planning`。
 - `kanban_list` — 列出卡片。
 - `kanban_get` — 读一张卡的时间线和子活动。
 
 **远程（claude.ai、ChatGPT 等）**：聊天平台的服务器要能访问看板，所以需要公网 HTTPS 地址（例如 Cloudflare Tunnel / Tailscale Funnel / 反向代理），并且**必须设置 `AKB_TOKEN`**。在平台里添加自定义 connector，URL 填 `https://<看板地址>/mcp?token=<AKB_TOKEN>`（平台支持自定义 header 时，用 `Authorization: Bearer` 更好）。
+
+**按来源分钥匙（推荐给每个 bot / agent 一把）**：除了 `AKB_TOKEN`，看板还认一组只能用于 `/mcp` 的来源钥匙。配置里只放哈希：
+
+```bash
+# 在服务器上生成（钥匙只显示一次，私下交给 bot 的主人；不要贴进聊天、PR 或任务文本）
+akb token-new --source claude-code
+akb token-new --source grok-bot --agent ops-bot
+# 已有钥匙算哈希：read -rs K && printf %s "$K" | akb token-hash --source claude-code
+```
+
+把输出的条目用逗号连起来写进 `AKB_SOURCE_TOKENS`（例如 `claude-code:<sha256>,grok-bot@ops-bot:<sha256>`），重启看板。
+
+- 用来源钥匙调 `kanban_report`：新卡的 source 固定为钥匙绑定的来源；传了别的 `source` 直接拒绝。
+- 只能改自己通过 MCP 建的卡。轮询器或 hook 建的卡（即使来源相同）只有 `AKB_TOKEN` 或对应的轮询器能改。
+- `parent_key` 必须是已经存在、而且属于自己来源的卡，不能借它造出别的来源的卡。
+- `kanban_list` 只返回自己来源的卡，`kanban_get` 读别的来源的卡返回 `No task`。
+- 钥匙绑定了 bot 名（`@名字`）时，`agent_name` 固定为该名字，传别的名字会被拒绝；读和挂子卡也只限这个 bot 的卡。
+- 钥匙至少 32 个字符（`akb token-new` 生成的是 43 个）；更短的钥匙 `token-hash` 拒绝，看板也不认。
+- 来源钥匙只能访问 `/mcp`，不能调 `/api/*`，也不能用 `?token=`，只认 `Authorization: Bearer`。
+- 作废某一把：从 `AKB_SOURCE_TOKENS` 删掉那一条再重启，其他钥匙不受影响。条目格式不对时看板拒绝启动，报错只写第几条，不回显内容。
+- `AKB_TOKEN` 的行为不变：任何来源、任何 `agent_name` 都可以。
 
 **本地（Claude Desktop、Cursor、Claude Code）**：用 stdio 桥：
 
@@ -185,11 +207,12 @@ curl -X POST http://127.0.0.1:7311/api/events -H 'content-type: application/json
 | 字段 | 说明 |
 | --- | --- |
 | `key` 或 `source` + `external_id` | 卡片身份（必填） |
-| `status` | `queued` `running` `waiting` `review` `done` `failed`，也接受各平台原生状态（`executing`、`FINISHED`、`waiting_approval`…） |
+| `status` | `queued` `planning` `running` `waiting` `review` `done` `failed`，也接受各平台原生状态（`executing`、`FINISHED`、`waiting_approval`…） |
 | `title`, `title_mode` | `replace`（默认）、`first`（只在还没有真正标题时设置）、`default`（兜底标题，之后任何标题都会覆盖） |
 | `message` | 时间线上的一行 |
 | `summary` | 当前状态或最终结果 |
 | `parent` | 父卡 key |
+| `agent_name` | 具体是哪个 bot / agent（例如 `ops-bot`），显示在来源旁边 |
 | `kind` | `cli` `ide` `cloud` `chat` `bot` `other` |
 | `url`, `links`, `cwd`, `meta` | 附加信息 |
 | `event_id` | 去重：同一张卡上相同 `event_id` 只处理一次 |
@@ -221,7 +244,8 @@ npm test
 ```
 src/
   store.js            卡片模型：按 key 合并、父子关系、去重、持久化
-  status.js           各平台状态 → 六列
+  status.js           各平台状态 → 七列
+  source-tokens.js    按来源分的 MCP 钥匙（只存哈希）
   server.js           HTTP / SSE / MCP / webhook，轮询调度
   mcp.js              MCP 工具
   cli.js              akb 命令

@@ -12,6 +12,7 @@ import { claudeCodeEvents } from "./adapters/claude-code.js";
 import { cursorEvents, cursorHookResponse } from "./adapters/cursor.js";
 import { codexEvents } from "./adapters/codex.js";
 import { COLUMNS } from "./status.js";
+import { hashToken, newToken, parseSourceTokens, MIN_TOKEN_LENGTH } from "./source-tokens.js";
 
 const BASE = (process.env.AKB_URL || "http://127.0.0.1:7311").replace(/\/+$/, "");
 const HOOKS = { "claude-code": claudeCodeEvents, claude: claudeCodeEvents, cursor: cursorEvents, codex: codexEvents };
@@ -24,6 +25,8 @@ const USAGE = `akb — cross-platform agent kanban
   akb report --title T --status S [--key K] [--parent K] [--note N] [--source S]
   akb list                                     print the board
   akb mcp                                      stdio MCP bridge to the running board
+  akb token-new --source S [--agent NAME]      new per-source MCP key + its AKB_SOURCE_TOKENS entry
+  akb token-hash --source S [--agent NAME]     same, for a key read from stdin
 
 Env: AKB_URL (default http://127.0.0.1:7311), AKB_TOKEN, AKB_PARENT_KEY, AKB_TASK_KEY`;
 
@@ -209,7 +212,32 @@ async function cmdMcp() {
 }
 
 const f = flags(process.argv.slice(2));
-const commands = { serve: cmdServe, hook: cmdHook, send: cmdSend, run: cmdRun, report: cmdReport, list: cmdList, mcp: cmdMcp };
+// Per-source keys: the key goes to the bot owner privately; only the entry (with its hash) goes in
+// AKB_SOURCE_TOKENS. Run on the server; never paste the key into chat, PRs or task text.
+function sourceEntry(f, token) {
+  if (!f.source || f.source === true) throw new Error("--source is required, e.g. --source claude-code");
+  const who = f.agent && f.agent !== true ? `${f.source}@${f.agent}` : String(f.source);
+  const entry = `${who}:${hashToken(token)}`;
+  parseSourceTokens(entry); // validate before printing
+  return entry;
+}
+
+async function cmdTokenNew(f) {
+  const token = newToken();
+  const entry = sourceEntry(f, token);
+  console.error("Key (shown once; give it to the bot owner privately):");
+  console.log(token);
+  console.error(`Add to AKB_SOURCE_TOKENS (comma separated), then restart the board:\n${entry}`);
+}
+
+async function cmdTokenHash(f) {
+  const token = (await readStdin()).trim();
+  if (!token) throw new Error("pipe the key on stdin, e.g. read -rs K && printf %s \"$K\" | akb token-hash --source claude-code");
+  if (token.length < MIN_TOKEN_LENGTH) throw new Error(`the key must be at least ${MIN_TOKEN_LENGTH} characters; use akb token-new for a fresh one`);
+  console.log(sourceEntry(f, token));
+}
+
+const commands = { "token-new": cmdTokenNew, "token-hash": cmdTokenHash, serve: cmdServe, hook: cmdHook, send: cmdSend, run: cmdRun, report: cmdReport, list: cmdList, mcp: cmdMcp };
 const fn = commands[f._[0]];
 if (!fn) {
   console.log(USAGE);
