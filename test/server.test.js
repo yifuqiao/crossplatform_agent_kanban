@@ -583,35 +583,9 @@ test("short AKB_SESSION_SECRET (<32 bytes) keeps wecom unwired", async () => {
   });
 });
 
-test("POST /api/grok/status-check validates keys and calls the relay poller", async () => {
-  const asked = [];
-  const grok = { askStatus: async (keys) => (asked.push(keys), { relayTaskId: "r-new", key: "grok-bot:r-new" }) };
-  const store = new Store();
-  const server = createServer({ store, token: "t", grok });
-  await new Promise((r) => server.listen(0, "127.0.0.1", r));
-  const base = `http://127.0.0.1:${server.address().port}`;
-  const k = "grok-bot:15ee3b55-0ce7-4244-bed4-0d386611c815";
-  store.apply({ key: k, title: "old", status: "queued" });
-  const post = (body) => fetch(`${base}/api/grok/status-check`, json(body, { authorization: "Bearer t" }));
-  try {
-    assert.equal((await post({ keys: ["claude-code:x"] })).status, 400);
-    assert.equal((await post({ keys: ["grok-bot:00000000-0000-4000-8000-000000000000"] })).status, 400);
-    const ok = await post({ keys: [k] });
-    assert.equal(ok.status, 200);
-    assert.deepEqual(asked, [[k]]);
-    assert.equal((await fetch(`${base}/api/grok/status-check`, json({ keys: [k] }))).status, 401);
-  } finally {
-    server.closeAllConnections?.();
-    await new Promise((r) => server.close(r));
-  }
-
-  const bare = createServer({ store, token: "t" });
-  await new Promise((r) => bare.listen(0, "127.0.0.1", r));
-  try {
-    const res = await fetch(`http://127.0.0.1:${bare.address().port}/api/grok/status-check`, json({ keys: [k] }, { authorization: "Bearer t" }));
-    assert.equal(res.status, 503);
-  } finally {
-    bare.closeAllConnections?.();
-    await new Promise((r) => bare.close(r));
-  }
+test("there is no endpoint that dispatches tasks to the relay", async () => {
+  await withServer({ token: "t" }, async (base) => {
+    const res = await fetch(`${base}/api/grok/status-check`, json({ keys: ["grok-bot:15ee3b55-0ce7-4244-bed4-0d386611c815"] }, { authorization: "Bearer t" }));
+    assert.equal(res.status, 404);
+  });
 });

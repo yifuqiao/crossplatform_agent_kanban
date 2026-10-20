@@ -241,11 +241,11 @@ export class Store extends EventEmitter {
     return out;
   }
 
-  // A placeholder that lost its last child has nothing left to show.
+  // A placeholder that lost its last child has nothing left to show, unless it has its own history.
   dropOrRollup(key) {
     const p = this.tasks.get(key);
     if (!p) return;
-    if (p.placeholder && !this.children(key).length) {
+    if (p.placeholder && !this.children(key).length && !p.events?.length && !p.summary) {
       this.tasks.delete(key);
       this.emit("remove", [key]);
       if (p.parentKey) this.dropOrRollup(p.parentKey);

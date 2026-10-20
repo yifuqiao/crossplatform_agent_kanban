@@ -121,33 +121,65 @@ test("a task titled 取代 <id> marks the older relay task superseded", async ()
   assert.equal(supersededEvents(tasks.slice(1)).length, 0);
 });
 
-test("status-check request is deduped per day and fits the relay webhook limit", async () => {
-  const { statusCheckRequest } = await import("../src/pollers/grok-relay.js");
-  const tasks = Array.from({ length: 10 }, (_, i) => ({ relayTaskId: `${String(i).padStart(8, "0")}-0000-4000-8000-000000000000`, title: "部署日川数字工厂手机版 UI（PR #85）".repeat(3) }));
-  const a = statusCheckRequest(tasks, new Date("2026-10-20T10:00:00Z"));
-  const b = statusCheckRequest([...tasks].reverse(), new Date("2026-10-20T23:00:00Z"));
-  const c = statusCheckRequest(tasks, new Date("2026-10-21T01:00:00Z"));
-  assert.equal(a.client_request_id, b.client_request_id);
-  assert.notEqual(a.client_request_id, c.client_request_id);
-  assert.ok(Buffer.byteLength(JSON.stringify(a)) < 3000);
-  assert.match(a.objective, /00000003-0000-4000-8000-000000000000/);
-});
-
-test("askStatus submits to the relay and nests the check under the task", async () => {
+test("the board only reads from the relay: every request is a GET, nothing is submitted", async () => {
   const s = new Store();
   const calls = [];
-  const fetchImpl = async (url, opts) => {
-    calls.push({ url, opts });
-    if (url.endsWith("/submit-task")) return { ok: true, status: 200, json: async () => ({ relayTaskId: "aaaaaaaa-1111-4222-8333-444444444444", status: "submitted" }) };
+  const fetchImpl = async (url, opts = {}) => {
+    calls.push({ url, method: opts.method || "GET" });
     return { ok: true, status: 200, json: async () => (url.includes("/tasks?") ? { tasks: [listed] } : detail) };
   };
-  const poller = createGrokRelayPoller({ store: s, baseUrl: "https://relay.example.com", keys: ["k1", "k2"], fetchImpl });
+  const poller = createGrokRelayPoller({ store: s, baseUrl: "https://relay.example.com", keys: ["k1"], fetchImpl });
   await poller.poll();
-  const out = await poller.askStatus([`grok-bot:${ID}`]);
-  const submit = calls.find((c) => c.url.endsWith("/submit-task"));
-  assert.equal(submit.opts.headers.authorization, "Bearer k1");
-  assert.equal(JSON.parse(submit.opts.body).source, "agent-kanban");
-  assert.equal(out.key, "grok-bot:aaaaaaaa-1111-4222-8333-444444444444");
-  assert.equal(s.get(out.key).parentKey, `grok-bot:${ID}`);
-  assert.equal(s.get(`grok-bot:${ID}`).meta.status_check, out.key);
+  assert.ok(calls.length > 0);
+  assert.ok(calls.every((c) => c.method === "GET"), "relay must only be read");
+  assert.ok(calls.every((c) => !/submit-task|executor/.test(c.url)));
+  assert.deepEqual(Object.keys(poller).sort(), ["log", "name", "poll"]);
+});
+
+const LEGACY_A = "claude-chat:https://claude.ai/code/session_01BPER2M4UidTDfYdHw8ji51";
+const LEGACY_B = "claude-chat:session_018LiRxJRaWVn6hXRmgeyKD7";
+
+// Restart on a state.json saved before Claude Code session cards were keyed claude-code-web:*.
+async function restartAndPoll(relayTasks) {
+  const { default: fs } = await import("node:fs");
+  const { default: os } = await import("node:os");
+  const { default: path } = await import("node:path");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "akb-"));
+  fs.copyFileSync(new URL("./fixtures/state-legacy-parents.json", import.meta.url), path.join(dir, "state.json"));
+  const s = new Store({ dataDir: dir });
+  const before = new Map([...s.tasks.values()].map((t) => [t.key, t.parentKey]));
+  const fetchImpl = async (url) => {
+    const id = url.split("/tasks/")[1];
+    const body = id ? relayTasks.find((t) => t.relayTaskId === id) : { tasks: relayTasks.map(({ updates, ...t }) => t) };
+    return { ok: true, status: 200, json: async () => body };
+  };
+  await createGrokRelayPoller({ store: s, baseUrl: "https://relay.example.com", keys: ["k1"], fetchImpl }).poll();
+  return { s, before };
+}
+
+const relayTask = (relayTaskId, title, status, sourceThread, updatedAt) => ({
+  relayTaskId, title, status, source: "claude", sourceThread, kind: "task", createdAt: updatedAt, updatedAt, completion: null, updates: [],
+});
+
+test("restart + first poll on an old state.json keeps every card and key", async () => {
+  const { s, before } = await restartAndPoll([
+    relayTask("15ee3b55-0ce7-4244-bed4-0d386611c815", "合并并上线 PR #23（图纸）", "executing", "https://claude.ai/code/session_01BPER2M4UidTDfYdHw8ji51", "2026-10-20T08:00:00.000Z"),
+    relayTask("375b898b-6074-4e6e-82c9-a132d7e99eee", "部署 agent kanban 到 relay 服务器", "finished", "session_018LiRxJRaWVn6hXRmgeyKD7", "2026-10-19T09:00:00.000Z"),
+    relayTask("ad60c649-c58e-4cc5-9ca7-e9061d76e4a1", "部署 agent kanban（取代 375b898b）", "finished", "session_018LiRxJRaWVn6hXRmgeyKD7", "2026-10-19T09:30:00.000Z"),
+  ]);
+  const after = new Map([...s.tasks.values()].map((t) => [t.key, t.parentKey]));
+  assert.equal(after.size, before.size);
+  assert.deepEqual([...after.keys()].sort(), [...before.keys()].sort());
+  assert.deepEqual(after, before, "every card keeps its parent");
+  assert.ok(![...after.keys()].some((k) => k.startsWith("claude-code-web:")));
+  assert.equal(s.children(LEGACY_B).length, 2);
+});
+
+test("a new task from a conversation that has a legacy card joins that card", async () => {
+  const { s } = await restartAndPoll([
+    relayTask("0b1c2d3e-0000-4000-8000-000000000001", "新任务", "executing", "https://claude.ai/code/session_01BPER2M4UidTDfYdHw8ji51", "2026-10-20T08:00:00.000Z"),
+  ]);
+  assert.equal(s.get("grok-bot:0b1c2d3e-0000-4000-8000-000000000001").parentKey, LEGACY_A);
+  assert.equal(s.get("claude-code-web:session_01BPER2M4UidTDfYdHw8ji51"), null);
+  assert.equal(s.get(LEGACY_A).status, "running");
 });
