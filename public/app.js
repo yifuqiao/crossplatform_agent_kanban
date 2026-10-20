@@ -2,7 +2,7 @@ const SOURCE_COLORS = {
   "claude-code": "#d97757", "claude-chat": "#c96442", codex: "#10a37f", chatgpt: "#0f8f6f",
   cursor: "#3b3b3b", "cursor-cli": "#555", "cursor-cloud": "#6b5bd6", "grok-bot": "#111827", "grok-chat": "#374151",
 };
-const STATUS_LABEL = { queued: "Queued", planning: "规划中", running: "Running", waiting: "Needs you", review: "Review", done: "Done", failed: "Failed" };
+const STATUS_LABEL = { queued: "Queued", planning: "规划中", running: "Running", waiting: "等您", review: "审核中", done: "Done", failed: "Failed" };
 
 const params = new URLSearchParams(location.search);
 let token = params.get("token");
@@ -67,7 +67,7 @@ function staleReason(t) {
 function matches(t) {
   if (state.hidden.has(t.source)) return false;
   if (!state.query) return true;
-  const hay = `${t.title} ${t.summary || ""} ${t.source} ${t.agentName || ""} ${t.cwd || ""}`.toLowerCase();
+  const hay = `${t.title} ${t.summary || ""} ${t.source} ${t.agentName || ""} ${t.cwd || ""} ${t.question || ""} ${t.background || ""}`.toLowerCase();
   return hay.includes(state.query);
 }
 
@@ -90,29 +90,91 @@ function tree(key, depth = 0) {
       tree(c.key, depth + 1))));
 }
 
-function card(t) {
+async function pickChoice(t, value, btn) {
+  if (t.choice) return;
+  if (btn) btn.disabled = true;
+  try {
+    const res = await api(`api/tasks/${encodeURIComponent(t.key)}/choice`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ value }),
+    });
+    if (res.choice) {
+      const cur = state.tasks.get(t.key) || t;
+      state.tasks.set(t.key, { ...cur, choice: res.choice });
+      render();
+    }
+  } catch (err) {
+    if (btn) btn.disabled = false;
+    alert(`Could not record choice: ${err.message}`);
+  }
+}
+
+function choiceBlock(t, { compact = false } = {}) {
+  const hasPrompt = t.question || t.background || (t.options && t.options.length);
+  if (!hasPrompt && !t.choice) return null;
+  const chosen = t.choice;
+  return el("div", { class: `choice-block${compact ? " compact" : ""}`, onclick: (e) => e.stopPropagation() },
+    t.question && el("div", { class: "choice-q" }, t.question),
+    t.background && el("div", { class: "choice-bg", title: t.background }, t.background),
+    chosen && el("span", { class: "flag chosen", title: `${chosen.value} · ${chosen.source} · ${chosen.at}` }, "已选"),
+    t.options?.length && el("div", { class: "choice-opts" }, t.options.map((o) => {
+      const selected = chosen && chosen.value === o.value;
+      return el("button", {
+        class: `choice-btn${selected ? " selected" : ""}`,
+        type: "button",
+        disabled: Boolean(chosen),
+        title: o.value,
+        onclick: (e) => { e.stopPropagation(); pickChoice(t, o.value, e.currentTarget); },
+      }, o.label);
+    })));
+}
+
+function card(t, { showParent = false, hideTree = false } = {}) {
   const desc = descendants(t.key);
   const counts = {};
   for (const d of desc) counts[d.status] = (counts[d.status] || 0) + 1;
   const attention = t.status !== "waiting" && desc.some((d) => d.status === "waiting");
-  const last = t.events?.findLast((e) => e.type !== "update_request")?.message;
+  const last = t.events?.findLast((e) => e.type !== "update_request" && e.type !== "choice" && e.type !== "choice_clear")?.message;
   const same = (a, b) => a.slice(0, 60) === b.slice(0, 60);
-  const parent = state.flat && t.parentKey ? state.tasks.get(t.parentKey) : null;
+  const parent = (showParent || state.flat) && t.parentKey ? state.tasks.get(t.parentKey) : null;
   const stale = staleReason(t);
-  return el("article", { class: `card${attention ? " attention" : ""}${stale ? " stale" : ""}`, style: `--c:var(--${t.status})`, onclick: () => openTask(t.key) },
-    el("div", { class: "top" }, badge(t.source, t.agentName), t.kind && el("span", {}, t.kind), stale && el("span", { class: "flag" }, stale), t.updateRequest && el("span", { class: "flag asked", title: "Waiting for the agent to write a brief" }, "Update requested"), el("span", { class: "time", title: t.updatedAt }, ago(t.updatedAt))),
-    parent && el("div", { class: "last" }, `↳ ${parent.title}`),
+  // In 等您, every waiting card is listed once; hide the nested tree so a waiting child is not shown twice.
+  const showTree = !hideTree && !state.flat;
+  return el("article", { class: `card${attention ? " attention" : ""}${stale ? " stale" : ""}${t.choice ? " chosen" : ""}`, style: `--c:var(--${t.status})`, onclick: () => openTask(t.key) },
+    el("div", { class: "top" }, badge(t.source, t.agentName), t.kind && el("span", {}, t.kind), stale && el("span", { class: "flag" }, stale), t.updateRequest && el("span", { class: "flag asked", title: "Waiting for the agent to write a brief" }, "Update requested"), t.choice && el("span", { class: "flag chosen" }, "已选"), el("span", { class: "time", title: t.updatedAt }, ago(t.updatedAt))),
+    parent && el("div", { class: "last parent-line" }, `父卡：${parent.title}`),
     el("div", { class: "title" }, t.title),
     t.summary && el("div", { class: "summary" }, t.summary),
     last && !(t.summary && same(last, t.summary)) && el("div", { class: "last", title: last }, last),
-    desc.length > 0 && el("div", { class: "rollup" }, Object.entries(counts).map(([s, n]) => el("span", { class: "pill", style: `--c:var(--${s})` }, `${n} ${STATUS_LABEL[s]}`))),
-    !state.flat && tree(t.key));
+    choiceBlock(t, { compact: true }),
+    desc.length > 0 && !hideTree && el("div", { class: "rollup" }, Object.entries(counts).map(([s, n]) => el("span", { class: "pill", style: `--c:var(--${s})` }, `${n} ${STATUS_LABEL[s]}`))),
+    showTree && tree(t.key));
 }
 
 function renderSources() {
   const sources = [...new Set([...state.tasks.values()].map((t) => t.source))].sort();
   $("sources").replaceChildren(...sources.map((s) =>
     el("button", { class: "chip", "aria-pressed": String(!state.hidden.has(s)), onclick: () => { state.hidden.has(s) ? state.hidden.delete(s) : state.hidden.add(s); render(); } }, s)));
+}
+
+// 等您 column aggregates every waiting card (including nested children); other columns keep roots only
+// (or all cards when "Sub-tasks as cards" is on). Parent cards stay in their own status column.
+function cardsForColumn(colId, rootVisible) {
+  if (colId !== "waiting") {
+    return rootVisible.filter((t) => t.status === colId);
+  }
+  // One card per waiting key (dedupe if flat mode also lists the same child).
+  const seen = new Set();
+  const out = [];
+  for (const t of state.tasks.values()) {
+    if (t.status !== "waiting" || !matches(t) || seen.has(t.key)) continue;
+    if (!state.showStale && staleReason(t)) continue;
+    seen.add(t.key);
+    out.push(t);
+  }
+  out.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  return out;
 }
 
 function render() {
@@ -123,10 +185,13 @@ function render() {
   const visible = state.showStale ? candidates : candidates.filter((t) => !staleReason(t));
   visible.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   $("board").replaceChildren(...state.columns.map((col) => {
-    const cards = visible.filter((t) => t.status === col.id);
+    const cards = cardsForColumn(col.id, visible);
     return el("section", { class: "column" },
       el("h2", {}, el("span", {}, el("span", { class: "dot", style: `background:var(--${col.id})` }), col.label), el("span", {}, cards.length)),
-      cards.length ? cards.map(card) : el("div", { class: "empty" }, "—"));
+      cards.length ? cards.map((t) => card(t, {
+        showParent: col.id === "waiting" && Boolean(t.parentKey),
+        hideTree: col.id === "waiting",
+      })) : el("div", { class: "empty" }, "—"));
   }));
   if (state.open) renderDetail();
 }
@@ -144,9 +209,12 @@ async function api(path, opts) {
       try { localStorage.setItem("akb-token", t); } catch {}
       return api(path, opts);
     }
+    throw new Error("HTTP 401");
   }
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
+  if (res.status === 204) return null;
+  const ct = res.headers.get("content-type") || "";
+  return ct.includes("application/json") ? res.json() : null;
 }
 
 async function openTask(key) {
@@ -165,6 +233,7 @@ function renderDetail() {
   const parent = t.parentKey && state.tasks.get(t.parentKey);
   const meta = [["Status", STATUS_LABEL[t.status]], ["Source", t.source], ["Agent", t.agentName], ["Kind", t.kind], ["Key", t.key], ["Folder", t.cwd],
     ["Started", t.startedAt && new Date(t.startedAt).toLocaleString()], ["Updated", new Date(t.updatedAt).toLocaleString()],
+    t.choice && ["Choice", `${t.choice.value} (${t.choice.source}, ${new Date(t.choice.at).toLocaleString()})`],
     ...Object.entries(t.meta || {}).filter(([, v]) => v != null && typeof v !== "object").map(([k, v]) => [k, String(v)])].filter(([, v]) => v);
   const links = [...(t.url ? [{ url: t.url, label: "Open" }] : []), ...(t.links || [])];
   $("detail").replaceChildren(...[
@@ -172,6 +241,7 @@ function renderDetail() {
     el("h3", {}, t.title),
     parent && el("div", { class: "last" }, "Part of ", el("a", { href: "#", onclick: (e) => { e.preventDefault(); openTask(parent.key); } }, parent.title)),
     t.summary && el("p", {}, t.summary),
+    choiceBlock(t),
     links.length > 0 && el("div", { class: "links" }, links.map((l) => el("a", { href: l.url, target: "_blank", rel: "noopener noreferrer" }, l.label || l.url))),
     el("div", { class: "meta" }, meta.flatMap(([k, v]) => [el("span", {}, k), el("span", {}, v)])),
     childrenOf(t.key).length > 0 && el("section", {}, el("h4", {}, "Nested activity"), tree(t.key)),

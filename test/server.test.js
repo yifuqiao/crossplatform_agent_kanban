@@ -85,7 +85,7 @@ test("MCP: initialize, list tools, report and list a chat task", async () => {
     assert.equal(init.result.serverInfo.name, "agent-kanban");
     assert.equal((await fetch(`${base}/mcp`, json({ jsonrpc: "2.0", method: "notifications/initialized" }, bearer("test-token")))).status, 202);
     const tools = await rpc("tools/list", {});
-    assert.deepEqual(tools.result.tools.map((t) => t.name), ["kanban_report", "kanban_list", "kanban_update_requests", "kanban_get"]);
+    assert.deepEqual(tools.result.tools.map((t) => t.name), ["kanban_report", "kanban_list", "kanban_update_requests", "kanban_get", "kanban_get_choice"]);
 
     const created = await rpc("tools/call", { name: "kanban_report", arguments: { title: "Plan Q4 launch", status: "running", source: "claude-chat" } });
     const key = created.result.structuredContent.task_key;

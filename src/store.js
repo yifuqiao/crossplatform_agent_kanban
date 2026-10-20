@@ -57,6 +57,44 @@ function cleanLinks(links) {
     .map((l) => ({ url: l.url.slice(0, 1000), label: cleanString(l.label, 80) || undefined }));
 }
 
+// Needs-you option buttons: each needs a non-empty label and value.
+function cleanOptions(options) {
+  if (!Array.isArray(options)) return undefined;
+  return options
+    .map((o) => (o && typeof o === "object" ? { label: cleanString(o.label, 80), value: cleanString(o.value, 200) } : null))
+    .filter((o) => o && o.label && o.value)
+    .slice(0, 12);
+}
+
+// Same option values (order ignored) — reorder alone is not a new round.
+function optionsSameValues(a, b) {
+  if (!a && !b) return true;
+  if (!a || !b || a.length !== b.length) return false;
+  const av = a.map((o) => o.value).sort();
+  const bv = b.map((o) => o.value).sort();
+  return av.every((v, i) => v === bv[i]);
+}
+
+function optionLabel(options, value) {
+  return options?.find((o) => o.value === value)?.label;
+}
+
+// Same validation for board clicks and chat choice_resolved (except source, which callers force).
+function validateChoice(task, value) {
+  if (!task || task.placeholder) return { error: "not found", status: 404 };
+  if (task.status !== "waiting") return { error: `task is ${task.status}`, status: 409 };
+  if (!task.options?.length) return { error: "no options on this card", status: 409 };
+  if (typeof value !== "string") return { error: "value must be a string", status: 400 };
+  const cleaned = cleanString(value, 200);
+  if (!cleaned) return { error: "value required", status: 400 };
+  if (!task.options.some((o) => o.value === cleaned)) return { error: "value not in options", status: 400 };
+  if (task.choice) {
+    if (task.choice.value === cleaned) return { ok: true, cleaned, idempotent: true };
+    return { error: "already chosen", status: 409 };
+  }
+  return { ok: true, cleaned, idempotent: false };
+}
+
 export class Store extends EventEmitter {
   constructor({ dataDir } = {}) {
     super();
@@ -191,6 +229,41 @@ export class Store extends EventEmitter {
       task.meta = { ...task.meta, ...input.meta };
     }
 
+    // Optional needs-you prompt fields (all omitable; old cards stay unchanged).
+    // A new question, a different set of option values, or a new label on the currently
+    // chosen value clears the live choice (prior pick stays on the timeline).
+    // Reordering the same values with unchanged labels does not.
+    const options = cleanOptions(input.options);
+    const question = cleanString(input.question, 500);
+    let newRound = false;
+    if (options) {
+      if (!optionsSameValues(task.options, options)) {
+        newRound = true;
+      } else if (task.choice) {
+        const prevLabel = optionLabel(task.options, task.choice.value);
+        const nextLabel = optionLabel(options, task.choice.value);
+        if (prevLabel && nextLabel && prevLabel !== nextLabel) newRound = true;
+      }
+      task.options = options;
+    }
+    if (question && question !== task.question) {
+      task.question = question;
+      newRound = true;
+    }
+    const background = cleanString(input.background, 4000);
+    if (background) task.background = background;
+    if (newRound && task.choice) {
+      task.events.push({
+        id: randomUUID(),
+        at: now,
+        status: null,
+        message: `Cleared previous choice “${task.choice.value}” for a new question`,
+        type: "choice_clear",
+      });
+      if (task.events.length > MAX_EVENTS) task.events.splice(0, task.events.length - MAX_EVENTS);
+      task.choice = null;
+    }
+
     const parent = parseRef(input.parent);
     let oldParentKey = null;
     if (parent) {
@@ -216,6 +289,29 @@ export class Store extends EventEmitter {
       task.startedAt = now;
     }
 
+    // Chat / /api/events resolution only — after status/options so running→waiting+choice works.
+    // Source is always "chat"; never trust client source:"board".
+    let choice_rejected;
+    if (input.choice_resolved && typeof input.choice_resolved === "object") {
+      const check = validateChoice(task, input.choice_resolved.value);
+      if (check.ok && !check.idempotent) {
+        const by = cleanString(input.choice_by, 80) || null;
+        const label = optionLabel(task.options, check.cleaned) || check.cleaned;
+        task.choice = { value: check.cleaned, label, at: now, source: "chat", by };
+        task.events.push({
+          id: randomUUID(),
+          at: now,
+          status: null,
+          message: `Chose “${label}” (${check.cleaned}, chat${by ? ` · ${by}` : ""})`,
+          type: "choice",
+        });
+        if (task.events.length > MAX_EVENTS) task.events.splice(0, task.events.length - MAX_EVENTS);
+      } else if (!check.ok) {
+        choice_rejected = { reason: check.error, status: check.status };
+      }
+      // Idempotent same value: success, no rejection.
+    }
+
     // A brief with no note of its own still goes on the timeline.
     const message = cleanString(input.message, 2000) || (input.brief && pendingRequest && summary ? summary.slice(0, 2000) : undefined);
     if (message || statusChanged) {
@@ -238,7 +334,7 @@ export class Store extends EventEmitter {
 
     this.scheduleSave();
     for (const t of new Set([task, ...changed])) this.emit("change", t);
-    return { task, changed: true };
+    return { task, changed: true, choice_rejected };
   }
 
   // The board only records the ask; the agent picks it up through MCP (kanban_report /
@@ -255,6 +351,33 @@ export class Store extends EventEmitter {
     this.scheduleSave();
     this.emit("change", task);
     return task;
+  }
+
+  // Board click only — always records source "board". Chat must use choice_resolved via apply.
+  // Nothing is sent to the agent or the relay — bots poll via kanban_get_choice.
+  recordChoice(key, { value, by } = {}) {
+    const task = this.tasks.get(key);
+    if (!task) return { error: "not found", status: 404 };
+    if (task.placeholder) return { error: "this card only groups other tasks; choose on one of them", status: 409 };
+    const check = validateChoice(task, value);
+    if (!check.ok) return { error: check.error, status: check.status };
+    if (check.idempotent) return { task, changed: false };
+    const at = new Date().toISOString();
+    const who = cleanString(by, 80) || null;
+    const label = optionLabel(task.options, check.cleaned) || check.cleaned;
+    task.choice = { value: check.cleaned, label, at, source: "board", by: who };
+    task.events.push({
+      id: randomUUID(),
+      at,
+      status: null,
+      message: `Chose “${label}” (${check.cleaned}, board${who ? ` · ${who}` : ""})`,
+      type: "choice",
+    });
+    if (task.events.length > MAX_EVENTS) task.events.splice(0, task.events.length - MAX_EVENTS);
+    if (at > task.updatedAt) task.updatedAt = at;
+    this.scheduleSave();
+    this.emit("change", task);
+    return { task, changed: true };
   }
 
   updateRequests({ source } = {}) {

@@ -3,8 +3,8 @@ export const COLUMNS = [
   { id: "queued", label: "Queued" },
   { id: "planning", label: "规划中" },
   { id: "running", label: "Running" },
-  { id: "waiting", label: "Needs you" },
-  { id: "review", label: "Review" },
+  { id: "waiting", label: "等您" },
+  { id: "review", label: "审核中" },
   { id: "done", label: "Done" },
   { id: "failed", label: "Failed" },
 ];
@@ -19,6 +19,8 @@ const ALIASES = {
   plan: "planning", planning: "planning", designing: "planning", "规划中": "planning",
   in_progress: "running", working: "running", active: "running", started: "running", busy: "running",
   blocked: "waiting", needs_input: "waiting", input_required: "waiting", paused: "waiting", idle: "review",
+  "等您": "waiting", needs_you: "waiting",
+  "审核中": "review", reviewing: "review", in_review: "review",
   completed: "done", complete: "done", success: "done", succeeded: "done", merged: "done",
   error: "failed", errored: "failed", cancelled: "failed", canceled: "failed", aborted: "failed",
   // grok-bot-task-relay

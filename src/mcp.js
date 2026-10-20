@@ -9,7 +9,7 @@ const TOOLS = [
     name: "kanban_report",
     title: "Report a task to the agent kanban",
     description:
-      "Create or update a card on the user's cross-platform agent kanban. Call it when you start a task the user asked for (status running), when you are blocked on the user (waiting), when you hand back a result to check (review), and when it is done or failed. Omit task_key to create a new card; pass the returned task_key on later calls. Pass parent_key when this work was spun up by another task on the board. The result lists update_requests: cards of your source where the user pressed Get update; answer each with a kanban_report carrying a short summary brief.",
+      "Create or update a card on the user's cross-platform agent kanban. Call it when you start a task the user asked for (status running), when you are blocked on the user (waiting), when you hand back a result to check (review / 审核中), and when it is done or failed. Omit task_key to create a new card; pass the returned task_key on later calls. Pass parent_key when this work was spun up by another task on the board. For waiting cards that need a human pick, optionally pass question, background, and options (label+value buttons). If the human already chose in chat, pass choice_resolved so the board marks the card 已选 (first choice wins). The result lists update_requests: cards of your source where the user pressed Get update; answer each with a kanban_report carrying a short summary brief.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -24,6 +24,30 @@ const TOOLS = [
         agent_name: { type: "string", maxLength: 60, description: "Which bot or agent on that platform is doing the work, e.g. ops-bot. Shown on the card next to the source." },
         parent_key: { type: "string", description: "task_key of the card that spun this work up." },
         links: { type: "array", maxItems: 20, items: { type: "object", required: ["url"], properties: { url: { type: "string" }, label: { type: "string" } } } },
+        question: { type: "string", maxLength: 500, description: "Short question shown on a waiting card, e.g. which option should we take?" },
+        background: { type: "string", maxLength: 4000, description: "Context for the human: what this is about, why they must choose, what each option does." },
+        options: {
+          type: "array",
+          maxItems: 12,
+          description: "Buttons on a waiting card. Each item needs label (button text) and value (stored choice).",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["label", "value"],
+            properties: { label: { type: "string", maxLength: 80 }, value: { type: "string", maxLength: 200 } },
+          },
+        },
+        choice_resolved: {
+          type: "object",
+          additionalProperties: false,
+          required: ["value"],
+          description:
+            "Mark the card as already chosen in chat. Always stored as source \"chat\" (any client-supplied source is ignored — only the board click API may write source \"board\"). First choice wins for the current question/options round.",
+          properties: {
+            value: { type: "string", maxLength: 200 },
+            source: { type: "string", description: "Ignored; stored source is always chat." },
+          },
+        },
       },
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
@@ -58,13 +82,21 @@ const TOOLS = [
     inputSchema: { type: "object", additionalProperties: false, required: ["task_key"], properties: { task_key: { type: "string" } } },
     annotations: { readOnlyHint: true },
   },
+  {
+    name: "kanban_get_choice",
+    title: "Read the choice on a waiting card",
+    description:
+      "Poll a waiting card for the human's pick (board button or chat). Returns choice null until someone selects; after that choice.value / choice.at / choice.source (board|chat). Opening-card bots should poll this instead of asking the board to push outbound.",
+    inputSchema: { type: "object", additionalProperties: false, required: ["task_key"], properties: { task_key: { type: "string" } } },
+    annotations: { readOnlyHint: true },
+  },
 ];
 
 // Errors whose message is safe to show the caller; anything else is reported as an internal error.
 class ToolError extends Error {}
 
 const ADMIN = { admin: true };
-const STRING_ARGS = ["task_key", "title", "status", "note", "summary", "source", "agent_name", "parent_key"];
+const STRING_ARGS = ["task_key", "title", "status", "note", "summary", "source", "agent_name", "parent_key", "question", "background"];
 
 // principal: ADMIN (AKB_TOKEN or a board login) or { source, agentName } from a per-source key.
 // A per-source key only sees its own source's cards (and only its bot's, when bound).
@@ -77,6 +109,12 @@ function canSee(principal, t) {
 function ownerOf(principal) {
   if (principal.admin) return "mcp:admin";
   return principal.agentName ? `mcp:${principal.source}@${principal.agentName}` : `mcp:${principal.source}`;
+}
+
+// Who recorded a chat-side choice (never "board").
+function choiceByOf(principal) {
+  if (principal.admin) return "admin-token";
+  return principal.agentName ? `${principal.source}@${principal.agentName}` : principal.source;
 }
 
 function brief(t, store, principal) {
@@ -125,6 +163,10 @@ function callTool(store, name, args = {}, principal = ADMIN) {
   if (name === "kanban_report") {
     // Check status before anything touches the store, so a bad call leaves no placeholder card behind.
     if (!normalizeStatus(args.status)) throw new ToolError(`status must be one of ${STATUSES.join(", ")}.`);
+    if (args.options != null && !Array.isArray(args.options)) throw new ToolError("options must be an array of {label, value}.");
+    if (args.choice_resolved != null && (typeof args.choice_resolved !== "object" || Array.isArray(args.choice_resolved))) {
+      throw new ToolError("choice_resolved must be an object with value (and optional source).");
+    }
     let key = args.task_key;
     const existing = key ? store.get(key) : null;
     if (key && (!existing || !canSee(principal, existing))) throw new ToolError(`No task ${key}. Omit task_key to create one.`);
@@ -133,15 +175,23 @@ function callTool(store, name, args = {}, principal = ADMIN) {
       if (!args.title) throw new ToolError("title is required when creating a card.");
       key = `${as.source}:${randomUUID()}`;
     }
-    const { task } = store.apply({
+    const choiceResolved = args.choice_resolved && typeof args.choice_resolved === "object"
+      ? { value: args.choice_resolved.value } // drop any client "source"; store forces chat
+      : undefined;
+    const { task, choice_rejected } = store.apply({
       key, title: args.title, status: args.status, message: args.note, summary: args.summary,
       parent: args.parent_key, links: args.links, kind: existing || !principal.admin ? undefined : "chat", agent_name: as.agentName,
       created_by: existing ? undefined : ownerOf(principal), brief: Boolean(args.summary), type: args.summary ? "brief" : undefined,
+      question: args.question, background: args.background, options: args.options,
+      choice_resolved: choiceResolved, choice_by: choiceResolved ? choiceByOf(principal) : undefined,
     });
-    return {
+    const out = {
       task_key: task.key, status: task.status, title: task.title, source: task.source, agent_name: task.agentName || null,
+      choice: task.choice || null,
       update_requests: updateRequests(store, principal, task.source),
     };
+    if (choice_rejected) out.choice_rejected = choice_rejected;
+    return out;
   }
   if (name === "kanban_update_requests") {
     return { update_requests: updateRequests(store, principal, args.source) };
@@ -155,6 +205,27 @@ function callTool(store, name, args = {}, principal = ADMIN) {
     if (!task || !canSee(principal, task)) throw new ToolError(`No task ${args.task_key}.`);
     const children = store.children(task.key).filter((t) => canSee(principal, t));
     return { task: { ...publicTask(task), events: task.events.slice(-30) }, children: children.map((t) => brief(t, store, principal)) };
+  }
+  if (name === "kanban_get_choice") {
+    const task = store.get(args.task_key);
+    if (!task || !canSee(principal, task)) throw new ToolError(`No task ${args.task_key}.`);
+    return {
+      task_key: task.key,
+      title: task.title,
+      status: task.status,
+      question: task.question || null,
+      background: task.background || null,
+      options: task.options || null,
+      choice: task.choice
+        ? {
+            value: task.choice.value,
+            label: task.choice.label || null,
+            at: task.choice.at,
+            source: task.choice.source,
+            by: task.choice.by || null,
+          }
+        : null,
+    };
   }
   throw new ToolError(`Unknown tool ${name}`);
 }
@@ -181,7 +252,13 @@ export function handleMcp(store, msg, principal = ADMIN) {
     case "tools/call":
       try {
         const result = callTool(store, msg.params?.name, msg.params?.arguments || {}, principal);
-        return reply({ content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result, isError: false });
+        // choice_resolved rejection still updates other fields, but surfaces as a tool error with reason.
+        // Include task_key so clients can retry without creating a duplicate card.
+        const rejected = result?.choice_rejected;
+        const text = rejected
+          ? `${result.task_key} 已更新，选择被拒：${rejected.reason}`
+          : JSON.stringify(result);
+        return reply({ content: [{ type: "text", text }], structuredContent: result, isError: Boolean(rejected) });
       } catch (err) {
         if (!(err instanceof ToolError)) console.error(`[akb] mcp ${msg.params?.name}: ${err.stack || err}`);
         return reply({ content: [{ type: "text", text: err instanceof ToolError ? err.message : "Internal error" }], isError: true });

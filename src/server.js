@@ -453,6 +453,24 @@ export function createServer({
         return send(res, 200, { ok: true, updateRequest: task.updateRequest });
       }
 
+      // Needs-you option click: record the choice on the card. Opening bots poll via kanban_get_choice;
+      // the board never POSTs to the relay or any agent. Only this path may write choice.source "board".
+      const choose = url.pathname.match(/^\/api\/tasks\/([^/]+)\/choice$/);
+      if (choose) {
+        if (req.method !== "POST") return send(res, 405, { error: "method not allowed" }, { allow: "POST" });
+        const key = decodeURIComponent(choose[1]);
+        if (!store.get(key)) return send(res, 404, { error: "not found" });
+        const body = parseJson(await readBody(req));
+        if (body?.value != null && typeof body.value !== "string") {
+          return send(res, 400, { error: "value must be a string" });
+        }
+        const session = sessionOk(req);
+        const by = session?.uid || (tokenOk(req, url, token) ? "admin-token" : null);
+        const result = store.recordChoice(key, { value: body?.value, by });
+        if (result.error) return send(res, result.status, { error: result.error });
+        return send(res, 200, { ok: true, choice: store.get(key).choice, changed: result.changed });
+      }
+
       const one = url.pathname.match(/^\/api\/tasks\/(.+)$/);
       if (one) {
         const key = decodeURIComponent(one[1]);
@@ -470,11 +488,33 @@ export function createServer({
         const results = [];
         for (const ev of events) {
           try {
-            const { task } = store.apply(ev);
-            results.push({ ok: true, key: task.key, status: task.status });
+            // choice_resolved via events is always chat; never honor a forged source:"board".
+            // choice_by is server-set — ignore any caller-provided value.
+            const event = ev && typeof ev === "object" && ev.choice_resolved && typeof ev.choice_resolved === "object"
+              ? {
+                  ...ev,
+                  choice_resolved: { value: ev.choice_resolved.value },
+                  choice_by: "events",
+                }
+              : ev;
+            const { task, choice_rejected } = store.apply(event);
+            if (choice_rejected) {
+              results.push({
+                ok: false,
+                key: task.key,
+                status: task.status,
+                error: choice_rejected.reason,
+                choice_rejected,
+              });
+            } else {
+              results.push({ ok: true, key: task.key, status: task.status });
+            }
           } catch (err) {
             results.push({ ok: false, error: err.message });
           }
+        }
+        if (!Array.isArray(body) && results[0]?.choice_rejected) {
+          return send(res, results[0].choice_rejected.status, results[0]);
         }
         const status = results.every((r) => r.ok) ? 200 : results.some((r) => r.ok) ? 207 : 400;
         return send(res, status, Array.isArray(body) ? { results } : results[0]);

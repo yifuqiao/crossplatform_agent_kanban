@@ -29,7 +29,24 @@ body { margin: 0; background: var(--bg); color: var(--text); }
 .card.stale { opacity: .6; border-left-style: dashed; }
 .flag { color: var(--waiting); font-weight: 600; }
 .flag.asked { color: var(--running); }
+.flag.chosen { color: var(--done); }
 .asked-note { margin: 20px 0 0; color: var(--running); font-size: 13px; }
+.parent-line { color: var(--waiting); font-weight: 500; }
+.choice-block { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+.choice-block.compact .choice-bg {
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+}
+.choice-q { font-weight: 600; font-size: 13px; }
+.choice-bg { color: var(--muted); font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+.choice-opts { display: flex; flex-wrap: wrap; gap: 6px; }
+.choice-btn {
+  border: 1px solid var(--waiting); background: color-mix(in srgb, var(--waiting) 12%, var(--panel));
+  color: var(--text); border-radius: 6px; padding: 4px 10px; cursor: pointer; font-size: 12px;
+}
+.choice-btn:hover:not(:disabled) { border-color: var(--text); }
+.choice-btn:disabled { opacity: .55; cursor: default; }
+.choice-btn.selected { border-color: var(--done); background: color-mix(in srgb, var(--done) 18%, var(--panel)); opacity: 1; font-weight: 600; }
+.action { margin-top: 16px; border: 1px solid var(--running); color: var(--running); background: none; border-radius: 6px; padding: 4px 10px; cursor: pointer; }
 .card .top { display: flex; gap: 6px; align-items: center; font-size: 11px; color: var(--muted); }
 .card .title { font-weight: 600; margin: 4px 0 2px; word-break: break-word; }
 .card .summary { color: var(--muted); font-size: 12px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
