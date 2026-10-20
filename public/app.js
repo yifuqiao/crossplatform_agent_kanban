@@ -233,7 +233,7 @@ function renderDetail() {
   const parent = t.parentKey && state.tasks.get(t.parentKey);
   const meta = [["Status", STATUS_LABEL[t.status]], ["Source", t.source], ["Agent", t.agentName], ["Kind", t.kind], ["Key", t.key], ["Folder", t.cwd],
     ["Started", t.startedAt && new Date(t.startedAt).toLocaleString()], ["Updated", new Date(t.updatedAt).toLocaleString()],
-    t.choice && ["Choice", `${t.choice.value} (${t.choice.source}, ${new Date(t.choice.at).toLocaleString()})`],
+    ...(t.choice ? [["Choice", `${t.choice.value} (${t.choice.source}, ${new Date(t.choice.at).toLocaleString()})`]] : []),
     ...Object.entries(t.meta || {}).filter(([, v]) => v != null && typeof v !== "object").map(([k, v]) => [k, String(v)])].filter(([, v]) => v);
   const links = [...(t.url ? [{ url: t.url, label: "Open" }] : []), ...(t.links || [])];
   $("detail").replaceChildren(...[
