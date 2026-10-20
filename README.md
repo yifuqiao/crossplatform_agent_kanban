@@ -121,11 +121,14 @@ relay 按调用方 key 隔离任务，所以每个提交任务的平台给一个
 
 ### 聊天类 agent（MCP）
 
-看板在 `/mcp` 提供 MCP 服务（Streamable HTTP，JSON 响应），三个工具：
+看板在 `/mcp` 提供 MCP 服务（Streamable HTTP，JSON 响应），四个工具：
 
-- `kanban_report` — 新建或更新卡片（`status`、`title`、`note`、`summary`、`links`、`parent_key`、`agent_name`）；返回 `task_key`，之后用它更新。`status` 可以是 `planning`。
+- `kanban_report` — 新建或更新卡片（`status`、`title`、`note`、`summary`、`links`、`parent_key`、`agent_name`）；返回 `task_key`，之后用它更新。`status` 可以是 `planning`。返回值里的 `update_requests` 列出同一来源下用户点了 Get update 的卡。
 - `kanban_list` — 列出卡片。
+- `kanban_update_requests` — 列出等着 agent 写更新简报的卡（可按 `source` 过滤）。
 - `kanban_get` — 读一张卡的时间线和子活动。
+
+**Get update**：卡片详情里的 Get update 按钮只在卡上记一笔“请求更新”，看板不会主动联系 agent 或 relay。agent 下次调用 `kanban_report` 时会在返回值里看到这个请求（或用 `kanban_update_requests` 主动查），用带 `summary` 的 `kanban_report` 回写最新简报，请求随之清除。卡片进入 done / failed 时请求也会清除。
 
 **远程（claude.ai、ChatGPT 等）**：聊天平台的服务器要能访问看板，所以需要公网 HTTPS 地址（例如 Cloudflare Tunnel / Tailscale Funnel / 反向代理），并且**必须设置 `AKB_TOKEN`**。在平台里添加自定义 connector，URL 填 `https://<看板地址>/mcp?token=<AKB_TOKEN>`（平台支持自定义 header 时，用 `Authorization: Bearer` 更好）。
 
@@ -197,6 +200,7 @@ curl -X POST http://127.0.0.1:7311/api/events -H 'content-type: application/json
 | `GET` | `/api/tasks` | 所有卡片（可选 `?status=`、`?source=`） |
 | `GET` | `/api/tasks/<key>` | 一张卡和它的子卡 |
 | `DELETE` | `/api/tasks/<key>` | 删除卡片及所有子孙 |
+| `POST` | `/api/tasks/<key>/update-request` | Get update：记录“请求更新简报”（已结束的卡返回 409） |
 | `GET` | `/api/stream` | SSE 实时推送（`task`、`remove`） |
 | `POST` | `/mcp` | MCP JSON-RPC |
 | `POST` | `/webhooks/cursor` | Cursor cloud agent webhook |

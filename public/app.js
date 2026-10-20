@@ -95,12 +95,12 @@ function card(t) {
   const counts = {};
   for (const d of desc) counts[d.status] = (counts[d.status] || 0) + 1;
   const attention = t.status !== "waiting" && desc.some((d) => d.status === "waiting");
-  const last = t.events?.at(-1)?.message;
+  const last = t.events?.findLast((e) => e.type !== "update_request")?.message;
   const same = (a, b) => a.slice(0, 60) === b.slice(0, 60);
   const parent = state.flat && t.parentKey ? state.tasks.get(t.parentKey) : null;
   const stale = staleReason(t);
   return el("article", { class: `card${attention ? " attention" : ""}${stale ? " stale" : ""}`, style: `--c:var(--${t.status})`, onclick: () => openTask(t.key) },
-    el("div", { class: "top" }, badge(t.source, t.agentName), t.kind && el("span", {}, t.kind), stale && el("span", { class: "flag" }, stale), el("span", { class: "time", title: t.updatedAt }, ago(t.updatedAt))),
+    el("div", { class: "top" }, badge(t.source, t.agentName), t.kind && el("span", {}, t.kind), stale && el("span", { class: "flag" }, stale), t.updateRequest && el("span", { class: "flag asked", title: "Waiting for the agent to write a brief" }, "Update requested"), el("span", { class: "time", title: t.updatedAt }, ago(t.updatedAt))),
     parent && el("div", { class: "last" }, `↳ ${parent.title}`),
     el("div", { class: "title" }, t.title),
     t.summary && el("div", { class: "summary" }, t.summary),
@@ -180,11 +180,30 @@ function renderDetail() {
         el("li", {}, el("span", { class: "sdot", style: `--c:var(--${e.status || "queued"})`, title: e.status || "" }),
           el("time", { title: e.at }, new Date(e.at).toLocaleTimeString()),
           el("span", {}, e.message || STATUS_LABEL[e.status] || ""))))),
+    updateControl(t),
     el("button", { class: "danger", onclick: async () => {
       if (!confirm("Remove this card and its nested activity from the board?")) return;
       await api(`api/tasks/${encodeURIComponent(t.key)}`, { method: "DELETE" });
     } }, "Remove from board"),
   ].filter((n) => n instanceof Node));
+}
+
+// Get update only records the ask on the card; the agent sees it the next time it talks to the
+// board over MCP and writes a brief back into the card.
+function updateControl(t) {
+  if (t.status === "done" || t.status === "failed" || t.placeholder) return null;
+  if (t.updateRequest) {
+    return el("div", { class: "asked-note" }, `Update requested ${ago(t.updateRequest.at)} ago. ${t.source} writes a brief here the next time it checks the board.`);
+  }
+  return el("button", { class: "action", title: "Ask the agent to write its latest brief into this card", onclick: async (e) => {
+    e.target.disabled = true;
+    try {
+      await api(`api/tasks/${encodeURIComponent(t.key)}/update-request`, { method: "POST" });
+    } catch (err) {
+      e.target.disabled = false;
+      alert(`Could not request an update: ${err.message}`);
+    }
+  } }, "Get update");
 }
 
 function connect() {

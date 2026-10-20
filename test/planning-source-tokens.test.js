@@ -338,3 +338,21 @@ test("cards without agent_name keep showing the source only; relay hand-offs car
   assert.equal(handoff.agentName, "示例机器人");
   assert.equal(s.get(`grok-bot:${id}`).agentName, undefined);
 });
+
+test("a per-source key only sees Get update requests on cards it can answer", async () => {
+  await withServer({}, async ({ rpc, store }) => {
+    const mine = (await rpc(CLAUDE_KEY, "kanban_report", { title: "Mine", status: "running" })).body.result.structuredContent.task_key;
+    store.apply({ key: "claude-code:polled", status: "running", title: "From the hook" });
+    store.apply({ key: "grok-bot:other", status: "running", title: "Other source" });
+    for (const k of [mine, "claude-code:polled", "grok-bot:other"]) store.requestUpdate(k);
+
+    const keys = (r) => r.body.result.structuredContent.update_requests.map((t) => t.task_key).sort();
+    assert.deepEqual(keys(await rpc(CLAUDE_KEY, "kanban_update_requests", {})), [mine]);
+    assert.deepEqual(keys(await rpc(CLAUDE_KEY, "kanban_update_requests", { source: "grok-bot" })), []);
+    assert.deepEqual(keys(await rpc(ADMIN, "kanban_update_requests", {})), [mine, "claude-code:polled", "grok-bot:other"].sort());
+
+    const answered = await rpc(CLAUDE_KEY, "kanban_report", { task_key: mine, status: "running", summary: "Halfway there" });
+    assert.deepEqual(keys(answered), []);
+    assert.equal(store.get(mine).updateRequest, null);
+  });
+});

@@ -9,7 +9,7 @@ const TOOLS = [
     name: "kanban_report",
     title: "Report a task to the agent kanban",
     description:
-      "Create or update a card on the user's cross-platform agent kanban. Call it when you start a task the user asked for (status running), when you are blocked on the user (waiting), when you hand back a result to check (review), and when it is done or failed. Omit task_key to create a new card; pass the returned task_key on later calls. Pass parent_key when this work was spun up by another task on the board.",
+      "Create or update a card on the user's cross-platform agent kanban. Call it when you start a task the user asked for (status running), when you are blocked on the user (waiting), when you hand back a result to check (review), and when it is done or failed. Omit task_key to create a new card; pass the returned task_key on later calls. Pass parent_key when this work was spun up by another task on the board. The result lists update_requests: cards of your source where the user pressed Get update; answer each with a kanban_report carrying a short summary brief.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -19,7 +19,7 @@ const TOOLS = [
         title: { type: "string", maxLength: 300 },
         status: { type: "string", enum: STATUSES },
         note: { type: "string", maxLength: 2000, description: "One timeline line describing what just happened." },
-        summary: { type: "string", maxLength: 4000, description: "Current overall state or final result." },
+        summary: { type: "string", maxLength: 4000, description: "Current overall state or final result. A summary answers an open update request on this card." },
         source: { type: "string", maxLength: 60, description: "Your platform, e.g. claude-code, claude-chat, chatgpt, grok-bot. Used when creating. A per-source key fixes this to its own source." },
         agent_name: { type: "string", maxLength: 60, description: "Which bot or agent on that platform is doing the work, e.g. ops-bot. Shown on the card next to the source." },
         parent_key: { type: "string", description: "task_key of the card that spun this work up." },
@@ -36,6 +36,18 @@ const TOOLS = [
       type: "object",
       additionalProperties: false,
       properties: { status: { type: "string", enum: STATUSES }, limit: { type: "integer", minimum: 1, maximum: 100 } },
+    },
+    annotations: { readOnlyHint: true },
+  },
+  {
+    name: "kanban_update_requests",
+    title: "List cards waiting for an update brief",
+    description:
+      "List cards where the user pressed Get update and is waiting for a brief. For each one you own, call kanban_report with its task_key, a summary (the latest state in a few lines: progress, numbers, blockers, next step) and a note. That clears the request.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: { source: { type: "string", maxLength: 60, description: "Only cards from this source, e.g. grok-bot." } },
     },
     annotations: { readOnlyHint: true },
   },
@@ -69,7 +81,17 @@ function ownerOf(principal) {
 
 function brief(t, store, principal) {
   const children = store.children(t.key).filter((c) => canSee(principal, c)).length;
-  return { task_key: t.key, title: t.title, status: t.status, source: t.source, agent_name: t.agentName || null, summary: t.summary, updatedAt: t.updatedAt, children };
+  return {
+    task_key: t.key, title: t.title, status: t.status, source: t.source, agent_name: t.agentName || null, summary: t.summary, updatedAt: t.updatedAt,
+    children, update_requested_at: t.updateRequest?.at,
+  };
+}
+
+// Open Get update requests this caller can answer: any card for AKB_TOKEN, only its own MCP cards for a per-source key.
+function updateRequests(store, principal, source) {
+  return store.updateRequests({ source })
+    .filter((t) => principal.admin || (canSee(principal, t) && t.createdBy === ownerOf(principal)))
+    .map((t) => ({ task_key: t.key, title: t.title, status: t.status, requested_at: t.updateRequest.at }));
 }
 
 // A per-source key can only create and update cards as its own source (and bot, when bound),
@@ -114,9 +136,15 @@ function callTool(store, name, args = {}, principal = ADMIN) {
     const { task } = store.apply({
       key, title: args.title, status: args.status, message: args.note, summary: args.summary,
       parent: args.parent_key, links: args.links, kind: existing || !principal.admin ? undefined : "chat", agent_name: as.agentName,
-      created_by: existing ? undefined : ownerOf(principal),
+      created_by: existing ? undefined : ownerOf(principal), brief: Boolean(args.summary), type: args.summary ? "brief" : undefined,
     });
-    return { task_key: task.key, status: task.status, title: task.title, source: task.source, agent_name: task.agentName || null };
+    return {
+      task_key: task.key, status: task.status, title: task.title, source: task.source, agent_name: task.agentName || null,
+      update_requests: updateRequests(store, principal, task.source),
+    };
+  }
+  if (name === "kanban_update_requests") {
+    return { update_requests: updateRequests(store, principal, args.source) };
   }
   if (name === "kanban_list") {
     const tasks = store.list({ status: args.status, root: true }).filter((t) => canSee(principal, t)).slice(0, args.limit || 25);
@@ -144,7 +172,7 @@ export function handleMcp(store, msg, principal = ADMIN) {
         protocolVersion: msg.params?.protocolVersion || "2025-06-18",
         capabilities: { tools: { listChanged: false } },
         serverInfo: { name: "agent-kanban", version: "0.1.0" },
-        instructions: "Report every task you start for the user with kanban_report, and update it when its status changes, so the user can follow all agent work on one board.",
+        instructions: "Report every task you start for the user with kanban_report, and update it when its status changes, so the user can follow all agent work on one board. When a result lists update_requests (the user pressed Get update on a card), answer each card you own with kanban_report: a short summary brief of where it stands now.",
       });
     case "ping":
       return reply({});
