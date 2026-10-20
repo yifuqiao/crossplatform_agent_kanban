@@ -26,6 +26,12 @@ akb serve           # http://127.0.0.1:7311
 
 打开 http://127.0.0.1:7311 。数据保存在 `~/.agent-kanban/state.json`。
 
+### 部署到服务器（通过网址访问）
+
+[`deploy/`](deploy/) 里有 systemd 服务、Caddy 反代片段、环境文件示例和部署清单 [`deploy/TASK.md`](deploy/TASK.md)。
+看板跑在 relay 同一台服务器上，监听 `127.0.0.1:7311`，由 Caddy 提供 HTTPS；本机直接轮询 relay。
+部署后在你的电脑上设置 `AKB_URL=https://<域名>` 和 `AKB_TOKEN=<token>`，hook 就会上报到线上看板。
+
 ## 看板怎么读
 
 - 六列：**Queued**、**Running**、**Needs you**（等你批准/回答）、**Review**（一轮做完，等你看结果或下一句话）、**Done**、**Failed**。
