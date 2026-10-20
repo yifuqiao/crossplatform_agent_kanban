@@ -58,6 +58,7 @@ body { margin: 0; background: var(--bg); color: var(--text); }
 .timeline li { display: grid; grid-template-columns: 10px 88px 1fr; gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--line); font-size: 12px; }
 .timeline time { color: var(--muted); }
 .links a { display: inline-block; margin: 0 8px 4px 0; color: var(--running); }
+.action { margin: 20px 8px 0 0; border: 1px solid var(--running); color: var(--running); background: none; border-radius: 6px; padding: 4px 10px; cursor: pointer; }
 .danger { margin-top: 20px; border: 1px solid var(--failed); color: var(--failed); background: none; border-radius: 6px; padding: 4px 10px; cursor: pointer; }
 .empty { color: var(--muted); font-size: 12px; text-align: center; padding: 16px 0; }
 

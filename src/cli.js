@@ -66,10 +66,10 @@ async function cmdServe(f) {
   }
   const dataDir = path.resolve(f.data || process.env.AKB_DATA_DIR || path.join(os.homedir(), ".agent-kanban"));
   const store = new Store({ dataDir });
-  const server = createServer({ store, dataDir });
+  const pollers = pollersFromEnv(store);
+  const server = createServer({ store, dataDir, grok: pollers.find((p) => p.name === "grok-relay") || null });
   const port = Number(f.port || process.env.PORT || 7311);
   const host = f.host || process.env.AKB_HOST || "127.0.0.1";
-  const pollers = pollersFromEnv(store);
   server.listen(port, host, () => {
     console.log(`[akb] board on http://${host}:${port}  (data: ${dataDir})`);
     if (pollers.length) console.log(`[akb] polling: ${pollers.map((p) => p.name).join(", ")}`);

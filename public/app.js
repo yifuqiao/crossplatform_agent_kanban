@@ -117,6 +117,10 @@ function render() {
   const candidates = [...state.tasks.values()].filter((t) => (state.flat || isRoot(t)) && matches(t));
   const staleCount = candidates.filter(staleReason).length;
   $("stale-count").textContent = staleCount;
+  const ask = [...state.tasks.values()].filter(askable).slice(0, 10);
+  $("ask-grok").hidden = ask.length === 0;
+  $("ask-grok").textContent = `Ask Grok Bot about ${ask.length} stale`;
+  $("ask-grok").onclick = () => askGrok(ask.map((t) => t.key));
   const visible = state.showStale ? candidates : candidates.filter((t) => !staleReason(t));
   visible.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   $("board").replaceChildren(...state.columns.map((col) => {
@@ -126,6 +130,22 @@ function render() {
       cards.length ? cards.map(card) : el("div", { class: "empty" }, "—"));
   }));
   if (state.open) renderDetail();
+}
+
+const RELAY_TASK = /^grok-bot:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+// Stale Grok Bot tasks the relay still calls open: Grok Bot can tell us (and the relay) what really happened.
+const askable = (t) => RELAY_TASK.test(t.key) && t.status !== "done" && t.status !== "failed" && staleReason(t);
+
+async function askGrok(keys) {
+  if (!confirm(`Ask Grok Bot (via the task relay) to report the real status of ${keys.length} task(s)? It only checks and reports; nothing is re-run.`)) return;
+  try {
+    const res = await fetch(withToken("api/grok/status-check"), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ keys }) });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+    alert(`Sent to Grok Bot. Relay task ${body.relayTaskId}${body.deduplicated ? " (already sent today)" : ""}. Cards update when it reports back.`);
+  } catch (err) {
+    alert(`Could not send: ${err.message}`);
+  }
 }
 
 async function api(path, opts) {
@@ -177,6 +197,7 @@ function renderDetail() {
         el("li", {}, el("span", { class: "sdot", style: `--c:var(--${e.status || "queued"})`, title: e.status || "" }),
           el("time", { title: e.at }, new Date(e.at).toLocaleTimeString()),
           el("span", {}, e.message || STATUS_LABEL[e.status] || ""))))),
+    askable(t) && el("button", { class: "action", onclick: () => askGrok([t.key]) }, "Ask Grok Bot for status"),
     el("button", { class: "danger", onclick: async () => {
       if (!confirm("Remove this card and its nested activity from the board?")) return;
       await api(`api/tasks/${encodeURIComponent(t.key)}`, { method: "DELETE" });
