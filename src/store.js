@@ -84,11 +84,15 @@ export class Store extends EventEmitter {
 
   flush() {
     if (!this.file) return;
-    fs.mkdirSync(path.dirname(this.file), { recursive: true });
-    const tasks = [...this.tasks.values()].map((t) => ({ ...t, seen: [...t.seen] }));
-    const tmp = `${this.file}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify({ version: 1, tasks }));
-    fs.renameSync(tmp, this.file);
+    try {
+      fs.mkdirSync(path.dirname(this.file), { recursive: true, mode: 0o700 });
+      const tasks = [...this.tasks.values()].map((t) => ({ ...t, seen: [...t.seen] }));
+      const tmp = `${this.file}.${process.pid}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify({ version: 1, tasks }), { mode: 0o600 });
+      fs.renameSync(tmp, this.file);
+    } catch (err) {
+      console.error(`[akb] could not write ${this.file}: ${err.message}`);
+    }
   }
 
   get(key) {

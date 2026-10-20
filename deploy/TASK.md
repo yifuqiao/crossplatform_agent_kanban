@@ -19,17 +19,20 @@
 ## 1. 拷贝代码
 
 - 用已有的 SSH 登录 relay 服务器，不要猜测新账号。
-- `git clone https://github.com/yifuqiao/crossplatform_agent_kanban /opt/agent-kanban`；目录已存在就在里面 `git pull`，不要另起一份。
+- `git clone https://github.com/yifuqiao/crossplatform_agent_kanban /opt/agent-kanban`；目录已存在就在里面 `git fetch`，不要另起一份。
+- **钉死部署提交**：检出本次安全加固 PR 合入 `main` 后的 **merge commit**（或该 PR 的明确 commit SHA），不要用浮动的 `main` / `git pull` 最新 tip。例如：
+  - `git -C /opt/agent-kanban fetch origin`
+  - `git -C /opt/agent-kanban checkout <merge-commit-sha>`
 - 需要 Node.js 22 或更新版本（relay 已在用），项目没有第三方依赖，不需要 `npm install`。
 
-完成：`/opt/agent-kanban/src/cli.js` 存在，`git -C /opt/agent-kanban log -1` 是 main 的最新提交。
+完成：`/opt/agent-kanban/src/cli.js` 存在，`git -C /opt/agent-kanban rev-parse HEAD` 等于计划部署的那个 commit（不是“main 最新”）。
 
 ## 2. 环境文件
 
-- 按 `deploy/agent-kanban.env.example` 写 `/etc/agent-kanban.env`，权限 `0600`，属主 root。
-- `AKB_TOKEN` 新生成一个随机值（`openssl rand -hex 24`）。不要写进进度报告；用已有的私下渠道交给用户。
+- 按 `deploy/agent-kanban.env.example` 写 `/etc/agent-kanban.env`，权限 `0600`，属主 **root**（`root:root 0600`）。systemd 在 `DynamicUser` 降权之前以 root 读取 `EnvironmentFile`，所以文件保持 root 0600 即可，不要改成服务用户可读。
+- `AKB_TOKEN` 新生成一个随机值（`openssl rand -hex 24`）。不要写进进度报告；用已有的私下渠道交给用户。**必填**：没有 `AKB_TOKEN` 服务会拒绝启动。
 - `GROK_RELAY_KEYS` 从 `/etc/grok-bot-task-relay.env` 里的 `RELAY_API_KEY`，以及 `RELAY_CLIENT_KEYS` 里各调用方（例如 `claude`）的值取，逗号分隔。不要打印。
-- `mkdir -p /var/lib/agent-kanban`。
+- **不要**手动 `mkdir /var/lib/agent-kanban`：单元里的 `StateDirectory=agent-kanban` 会创建并收紧权限（`StateDirectoryMode=0700`）。`AKB_DATA_DIR=/var/lib/agent-kanban` 已由 unit / env 对齐。
 
 完成：环境文件只有 root 可读，回复里没有密钥。
 
@@ -63,9 +66,21 @@ systemctl enable --now agent-kanban
 - `https://relay.onetopway.com/kanban/api/tasks` 不带 token 返回 401；
 - `https://relay.onetopway.com/kanban` 跳转到 `/kanban/`。
 
+## 5. 部署后安全检查
+
+全部做完后跑这些，全部通过再报告 finished：
+
+- `systemd-analyze security agent-kanban`：总体暴露分数 **< 3**（OK / 较低暴露）。
+- `ss -ltnp | grep 7311`：只监听 `127.0.0.1:7311`（不要出现 `0.0.0.0` 或 `*`）。
+- 未带 token 时下列请求均为 **401**：
+  - `curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:7311/kanban/api/tasks`
+  - `curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:7311/kanban/mcp -H 'content-type: application/json' -d '{}'`
+  - `curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:7311/kanban/api/stream`
+  - `curl -s -o /dev/null -w '%{http_code}' -X DELETE http://127.0.0.1:7311/kanban/api/tasks/x:1`
+
 ## 报告
 
-finished 报告写：看板网址 `https://relay.onetopway.com/kanban/`、部署的 commit、各项检查结果。
+finished 报告写：看板网址 `https://relay.onetopway.com/kanban/`、部署的 commit、各项检查结果（含第 5 步）。
 用户打开 `https://relay.onetopway.com/kanban/?token=<AKB_TOKEN>` 即可，token 只私下给，不写进报告。
 
 ## 不要做的事

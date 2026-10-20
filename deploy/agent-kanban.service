@@ -7,9 +7,34 @@ Type=simple
 WorkingDirectory=/opt/agent-kanban
 EnvironmentFile=/etc/agent-kanban.env
 Environment=NODE_ENV=production
+Environment=AKB_DATA_DIR=/var/lib/agent-kanban
 ExecStart=/usr/bin/node src/cli.js serve
 Restart=always
 RestartSec=3
+
+# Unprivileged sandboxed runtime. EnvironmentFile is read by systemd as root
+# before privileges are dropped (keep /etc/agent-kanban.env root:root 0600).
+DynamicUser=yes
+StateDirectory=agent-kanban
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+MemoryMax=512M
+# Do not set MemoryDenyWriteExecute — Node's JIT needs writable+executable memory.
 
 [Install]
 WantedBy=multi-user.target

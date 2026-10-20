@@ -59,6 +59,10 @@ async function readStdin() {
 }
 
 async function cmdServe(f) {
+  if (!process.env.AKB_TOKEN) {
+    console.error("[akb] AKB_TOKEN is required; refuse to start without authentication");
+    process.exit(1);
+  }
   const dataDir = path.resolve(f.data || process.env.AKB_DATA_DIR || path.join(os.homedir(), ".agent-kanban"));
   const store = new Store({ dataDir });
   const server = createServer({ store });
@@ -67,7 +71,6 @@ async function cmdServe(f) {
   const pollers = pollersFromEnv(store);
   server.listen(port, host, () => {
     console.log(`[akb] board on http://${host}:${port}  (data: ${dataDir})`);
-    if (host !== "127.0.0.1" && host !== "localhost" && !process.env.AKB_TOKEN) console.warn("[akb] listening beyond localhost without AKB_TOKEN — anyone who can reach it can edit the board");
     if (pollers.length) console.log(`[akb] polling: ${pollers.map((p) => p.name).join(", ")}`);
   });
   const stop = startPollers(pollers, Number(f.poll || process.env.AKB_POLL_SECONDS || 30) * 1000);

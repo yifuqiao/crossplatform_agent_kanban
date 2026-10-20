@@ -45,7 +45,7 @@ function parseJson(buf) {
 }
 
 function tokenOk(req, url, token) {
-  if (!token) return true;
+  if (!token) return false;
   const header = req.headers.authorization || "";
   const given = header.startsWith("Bearer ") ? header.slice(7) : url.searchParams.get("token") || "";
   const a = Buffer.from(given);
@@ -78,7 +78,12 @@ export function createServer({ store = new Store(), token = process.env.AKB_TOKE
   heartbeat.unref();
 
   const server = http.createServer(async (req, res) => {
-    const url = new URL(req.url || "/", "http://localhost");
+    let url;
+    try {
+      url = new URL(req.url || "/", "http://localhost");
+    } catch {
+      return send(res, 400, { error: "bad request" });
+    }
     if (base) {
       // The page uses relative URLs, so it must be loaded with the trailing slash.
       if (url.pathname === base) {
@@ -98,8 +103,12 @@ export function createServer({ store = new Store(), token = process.env.AKB_TOKE
 
       if (url.pathname === "/webhooks/cursor" && req.method === "POST") {
         const raw = await readBody(req);
-        if (!verifyCursorWebhook(raw, req.headers["x-webhook-signature"], cursorWebhookSecret)) return send(res, 401, { error: "bad signature" });
-        if (!cursorWebhookSecret && !tokenOk(req, url, token)) return send(res, 401, { error: "unauthorized" });
+        // With a webhook secret, require a valid HMAC. Without one, require AKB_TOKEN (fail closed if that is also empty).
+        if (cursorWebhookSecret) {
+          if (!verifyCursorWebhook(raw, req.headers["x-webhook-signature"], cursorWebhookSecret)) return send(res, 401, { error: "bad signature" });
+        } else if (!tokenOk(req, url, token)) {
+          return send(res, 401, { error: "unauthorized" });
+        }
         const ev = cursorAgentEvent(parseJson(raw));
         if (ev) store.apply(ev);
         return send(res, 200, { ok: true });
