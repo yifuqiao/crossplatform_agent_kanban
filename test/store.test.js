@@ -113,3 +113,48 @@ test("a late-arriving older status does not overwrite a newer one", () => {
   s.apply({ key: "claude-code:s", status: "running", at: "2026-10-20T09:00:03Z" });
   assert.equal(s.get("claude-code:s").status, "running");
 });
+
+test("startup never deletes a card loaded from state.json, even an empty placeholder", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "akb-"));
+  const card = (key, extra) => ({ key, source: key.split(":")[0], externalId: key.split(":")[1], status: "done", placeholder: true, parentKey: null, links: [], meta: {}, events: [], seen: [], createdAt: "2026-10-19T00:00:00.000Z", updatedAt: "2026-10-19T00:00:00.000Z", ...extra });
+  fs.writeFileSync(path.join(dir, "state.json"), JSON.stringify({ version: 1, tasks: [
+    card("claude-chat:empty"),
+    card("claude-chat:with-events", { events: [{ id: "e1", at: "2026-10-19T00:00:00.000Z", status: null, message: "hello", type: null }] }),
+    card("claude-chat:with-summary", { summary: "notes" }),
+  ] }));
+  const s = new Store({ dataDir: dir });
+  assert.ok(s.get("claude-chat:empty"));
+  assert.ok(s.get("claude-chat:with-events"));
+  assert.ok(s.get("claude-chat:with-summary"));
+
+  s.apply({ key: "grok-bot:t1", parent: "claude-chat:with-events", status: "done" });
+  s.apply({ key: "grok-bot:t1", parent: "claude-chat:elsewhere" });
+  assert.ok(s.get("claude-chat:with-events"), "moving its child away does not delete it");
+});
+
+test("update requests: polled summaries do not answer them, a brief or a terminal status does", () => {
+  const s = new Store();
+  s.apply({ key: "grok-bot:r1", status: "running", title: "Long job" });
+  s.requestUpdate("grok-bot:r1", { by: "yifu" });
+  assert.equal(s.get("grok-bot:r1").updateRequest.by, "yifu");
+  s.apply({ key: "grok-bot:r1", summary: "relay snapshot" });
+  assert.ok(s.get("grok-bot:r1").updateRequest);
+  s.apply({ key: "grok-bot:r1", summary: "fresh brief", brief: true });
+  assert.equal(s.get("grok-bot:r1").updateRequest, null);
+  s.requestUpdate("grok-bot:r1");
+  s.apply({ key: "grok-bot:r1", status: "failed" });
+  assert.equal(s.get("grok-bot:r1").updateRequest, null);
+  assert.equal(s.requestUpdate("grok-bot:missing"), null);
+
+  // A brief that also closes the task still lands on the timeline.
+  s.apply({ key: "grok-bot:r2", status: "running", title: "Other job" });
+  s.requestUpdate("grok-bot:r2");
+  s.apply({ key: "grok-bot:r2", status: "done", summary: "final brief", brief: true });
+  assert.equal(s.get("grok-bot:r2").updateRequest, null);
+  assert.ok(s.get("grok-bot:r2").briefAt);
+  assert.equal(s.get("grok-bot:r2").events.at(-1).message, "final brief");
+
+  // Placeholders (cards that only group children) cannot be asked.
+  s.apply({ key: "cursor-cloud:bc-1", status: "running", parent: "claude-chat:thread" });
+  assert.equal(s.requestUpdate("claude-chat:thread"), null);
+});

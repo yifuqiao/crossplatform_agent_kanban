@@ -2,7 +2,7 @@ const SOURCE_COLORS = {
   "claude-code": "#d97757", "claude-chat": "#c96442", codex: "#10a37f", chatgpt: "#0f8f6f",
   cursor: "#3b3b3b", "cursor-cli": "#555", "cursor-cloud": "#6b5bd6", "grok-bot": "#111827", "grok-chat": "#374151",
 };
-const STATUS_LABEL = { queued: "Queued", running: "Running", waiting: "Needs you", review: "Review", done: "Done", failed: "Failed" };
+const STATUS_LABEL = { queued: "Queued", planning: "规划中", running: "Running", waiting: "Needs you", review: "Review", done: "Done", failed: "Failed" };
 
 const params = new URLSearchParams(location.search);
 let token = params.get("token");
@@ -59,7 +59,7 @@ function descendants(key, out = []) {
 // (e.g. a relay task Grok Bot never reported on). The relay still calls them open; we flag them.
 function staleReason(t) {
   if (t.meta?.superseded_by) return "Superseded";
-  if (t.status !== "queued" && t.status !== "running") return null;
+  if (t.status !== "queued" && t.status !== "planning" && t.status !== "running") return null;
   const last = [t, ...descendants(t.key)].reduce((m, d) => (d.updatedAt > m ? d.updatedAt : m), t.updatedAt);
   return Date.now() - Date.parse(last) > STALE_MS ? `No update for ${ago(last)}` : null;
 }
@@ -67,12 +67,15 @@ function staleReason(t) {
 function matches(t) {
   if (state.hidden.has(t.source)) return false;
   if (!state.query) return true;
-  const hay = `${t.title} ${t.summary || ""} ${t.source} ${t.cwd || ""}`.toLowerCase();
+  const hay = `${t.title} ${t.summary || ""} ${t.source} ${t.agentName || ""} ${t.cwd || ""}`.toLowerCase();
   return hay.includes(state.query);
 }
 
-function badge(source) {
-  return el("span", { class: "badge", style: `--b:${SOURCE_COLORS[source] || "#64748b"}` }, source);
+// "grok-bot · ops-bot" when the card names its bot; just the source otherwise.
+const who = (t) => (t.agentName ? `${t.source} · ${t.agentName}` : t.source);
+
+function badge(source, agentName) {
+  return el("span", { class: "badge", style: `--b:${SOURCE_COLORS[source] || "#64748b"}` }, agentName ? `${source} · ${agentName}` : source);
 }
 
 function tree(key, depth = 0) {
@@ -83,7 +86,7 @@ function tree(key, depth = 0) {
       el("div", { class: "row", title: c.summary || c.title, onclick: (e) => { e.stopPropagation(); openTask(c.key); } },
         el("span", { class: `sdot ${c.status}`, style: `--c:var(--${c.status})` }),
         el("span", { class: "name" }, c.title),
-        el("span", { class: "src", title: STATUS_LABEL[c.status] }, c.source)),
+        el("span", { class: "src", title: STATUS_LABEL[c.status] }, who(c))),
       tree(c.key, depth + 1))));
 }
 
@@ -92,12 +95,12 @@ function card(t) {
   const counts = {};
   for (const d of desc) counts[d.status] = (counts[d.status] || 0) + 1;
   const attention = t.status !== "waiting" && desc.some((d) => d.status === "waiting");
-  const last = t.events?.at(-1)?.message;
+  const last = t.events?.findLast((e) => e.type !== "update_request")?.message;
   const same = (a, b) => a.slice(0, 60) === b.slice(0, 60);
   const parent = state.flat && t.parentKey ? state.tasks.get(t.parentKey) : null;
   const stale = staleReason(t);
   return el("article", { class: `card${attention ? " attention" : ""}${stale ? " stale" : ""}`, style: `--c:var(--${t.status})`, onclick: () => openTask(t.key) },
-    el("div", { class: "top" }, badge(t.source), t.kind && el("span", {}, t.kind), stale && el("span", { class: "flag" }, stale), el("span", { class: "time", title: t.updatedAt }, ago(t.updatedAt))),
+    el("div", { class: "top" }, badge(t.source, t.agentName), t.kind && el("span", {}, t.kind), stale && el("span", { class: "flag" }, stale), t.updateRequest && el("span", { class: "flag asked", title: "Waiting for the agent to write a brief" }, "Update requested"), el("span", { class: "time", title: t.updatedAt }, ago(t.updatedAt))),
     parent && el("div", { class: "last" }, `↳ ${parent.title}`),
     el("div", { class: "title" }, t.title),
     t.summary && el("div", { class: "summary" }, t.summary),
@@ -117,10 +120,6 @@ function render() {
   const candidates = [...state.tasks.values()].filter((t) => (state.flat || isRoot(t)) && matches(t));
   const staleCount = candidates.filter(staleReason).length;
   $("stale-count").textContent = staleCount;
-  const ask = [...state.tasks.values()].filter(askable).slice(0, 10);
-  $("ask-grok").hidden = ask.length === 0;
-  $("ask-grok").textContent = `Ask Grok Bot about ${ask.length} stale`;
-  $("ask-grok").onclick = () => askGrok(ask.map((t) => t.key));
   const visible = state.showStale ? candidates : candidates.filter((t) => !staleReason(t));
   visible.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   $("board").replaceChildren(...state.columns.map((col) => {
@@ -130,22 +129,6 @@ function render() {
       cards.length ? cards.map(card) : el("div", { class: "empty" }, "—"));
   }));
   if (state.open) renderDetail();
-}
-
-const RELAY_TASK = /^grok-bot:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-// Stale Grok Bot tasks the relay still calls open: Grok Bot can tell us (and the relay) what really happened.
-const askable = (t) => RELAY_TASK.test(t.key) && t.status !== "done" && t.status !== "failed" && staleReason(t);
-
-async function askGrok(keys) {
-  if (!confirm(`Ask Grok Bot (via the task relay) to report the real status of ${keys.length} task(s)? It only checks and reports; nothing is re-run.`)) return;
-  try {
-    const res = await fetch(withToken("api/grok/status-check"), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ keys }) });
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
-    alert(`Sent to Grok Bot. Relay task ${body.relayTaskId}${body.deduplicated ? " (already sent today)" : ""}. Cards update when it reports back.`);
-  } catch (err) {
-    alert(`Could not send: ${err.message}`);
-  }
 }
 
 async function api(path, opts) {
@@ -180,12 +163,12 @@ function renderDetail() {
   const t = state.tasks.get(state.open);
   if (!t) return void ($("drawer").hidden = true);
   const parent = t.parentKey && state.tasks.get(t.parentKey);
-  const meta = [["Status", STATUS_LABEL[t.status]], ["Source", t.source], ["Kind", t.kind], ["Key", t.key], ["Folder", t.cwd],
+  const meta = [["Status", STATUS_LABEL[t.status]], ["Source", t.source], ["Agent", t.agentName], ["Kind", t.kind], ["Key", t.key], ["Folder", t.cwd],
     ["Started", t.startedAt && new Date(t.startedAt).toLocaleString()], ["Updated", new Date(t.updatedAt).toLocaleString()],
     ...Object.entries(t.meta || {}).filter(([, v]) => v != null && typeof v !== "object").map(([k, v]) => [k, String(v)])].filter(([, v]) => v);
   const links = [...(t.url ? [{ url: t.url, label: "Open" }] : []), ...(t.links || [])];
   $("detail").replaceChildren(...[
-    el("div", {}, badge(t.source)),
+    el("div", {}, badge(t.source, t.agentName)),
     el("h3", {}, t.title),
     parent && el("div", { class: "last" }, "Part of ", el("a", { href: "#", onclick: (e) => { e.preventDefault(); openTask(parent.key); } }, parent.title)),
     t.summary && el("p", {}, t.summary),
@@ -197,12 +180,30 @@ function renderDetail() {
         el("li", {}, el("span", { class: "sdot", style: `--c:var(--${e.status || "queued"})`, title: e.status || "" }),
           el("time", { title: e.at }, new Date(e.at).toLocaleTimeString()),
           el("span", {}, e.message || STATUS_LABEL[e.status] || ""))))),
-    askable(t) && el("button", { class: "action", onclick: () => askGrok([t.key]) }, "Ask Grok Bot for status"),
+    updateControl(t),
     el("button", { class: "danger", onclick: async () => {
       if (!confirm("Remove this card and its nested activity from the board?")) return;
       await api(`api/tasks/${encodeURIComponent(t.key)}`, { method: "DELETE" });
     } }, "Remove from board"),
   ].filter((n) => n instanceof Node));
+}
+
+// Get update only records the ask on the card; the agent sees it the next time it talks to the
+// board over MCP and writes a brief back into the card.
+function updateControl(t) {
+  if (t.status === "done" || t.status === "failed" || t.placeholder) return null;
+  if (t.updateRequest) {
+    return el("div", { class: "asked-note" }, `Update requested ${ago(t.updateRequest.at)} ago. ${t.source} writes a brief here the next time it checks the board.`);
+  }
+  return el("button", { class: "action", title: "Ask the agent to write its latest brief into this card", onclick: async (e) => {
+    e.target.disabled = true;
+    try {
+      await api(`api/tasks/${encodeURIComponent(t.key)}/update-request`, { method: "POST" });
+    } catch (err) {
+      e.target.disabled = false;
+      alert(`Could not request an update: ${err.message}`);
+    }
+  } }, "Get update");
 }
 
 function connect() {

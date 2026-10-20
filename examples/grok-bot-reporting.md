@@ -59,3 +59,12 @@ When you start Claude Code, Codex or Cursor CLI on a machine that has `akb` hook
 `AKB_PARENT_KEY=grok-bot:<relay_task_id>` in its environment (or launch it through
 `akb run --parent grok-bot:<relay_task_id> -- <command>`). Its session then appears nested under
 the relay task with live progress from its own hooks.
+
+## Get update requests
+
+The user can press **Get update** on a card. The board only marks the card; it does not message
+Grok Bot or the relay. Every `kanban_report` result carries `update_requests` (cards of your
+source waiting for a brief), and `kanban_update_requests` lists them on demand. Answer each one
+with `kanban_report` on its `task_key` with a `summary`: the latest state in a few lines
+(progress numbers, blockers, next step). Over HTTP, send the same as an event with
+`"summary": "...", "brief": true`.

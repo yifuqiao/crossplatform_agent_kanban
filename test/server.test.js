@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -32,7 +33,7 @@ test("POST /api/events then GET /api/tasks", async () => {
     assert.equal(res.status, 207);
     res = await fetch(`${base}/api/tasks`, { headers: bearer("test-token") });
     const { columns, tasks } = await res.json();
-    assert.equal(columns.length, 6);
+    assert.deepEqual(columns.map((c) => c.id), ["queued", "planning", "running", "waiting", "review", "done", "failed"]);
     assert.equal(tasks.length, 2);
     res = await fetch(`${base}/api/tasks/${encodeURIComponent("grok-bot:r1")}`, { headers: bearer("test-token") });
     assert.equal((await res.json()).children[0].key, "cursor-cloud:bc-1");
@@ -84,7 +85,7 @@ test("MCP: initialize, list tools, report and list a chat task", async () => {
     assert.equal(init.result.serverInfo.name, "agent-kanban");
     assert.equal((await fetch(`${base}/mcp`, json({ jsonrpc: "2.0", method: "notifications/initialized" }, bearer("test-token")))).status, 202);
     const tools = await rpc("tools/list", {});
-    assert.deepEqual(tools.result.tools.map((t) => t.name), ["kanban_report", "kanban_list", "kanban_get"]);
+    assert.deepEqual(tools.result.tools.map((t) => t.name), ["kanban_report", "kanban_list", "kanban_update_requests", "kanban_get"]);
 
     const created = await rpc("tools/call", { name: "kanban_report", arguments: { title: "Plan Q4 launch", status: "running", source: "claude-chat" } });
     const key = created.result.structuredContent.task_key;
@@ -583,35 +584,74 @@ test("short AKB_SESSION_SECRET (<32 bytes) keeps wecom unwired", async () => {
   });
 });
 
-test("POST /api/grok/status-check validates keys and calls the relay poller", async () => {
-  const asked = [];
-  const grok = { askStatus: async (keys) => (asked.push(keys), { relayTaskId: "r-new", key: "grok-bot:r-new" }) };
-  const store = new Store();
-  const server = createServer({ store, token: "t", grok });
-  await new Promise((r) => server.listen(0, "127.0.0.1", r));
-  const base = `http://127.0.0.1:${server.address().port}`;
-  const k = "grok-bot:15ee3b55-0ce7-4244-bed4-0d386611c815";
-  store.apply({ key: k, title: "old", status: "queued" });
-  const post = (body) => fetch(`${base}/api/grok/status-check`, json(body, { authorization: "Bearer t" }));
-  try {
-    assert.equal((await post({ keys: ["claude-code:x"] })).status, 400);
-    assert.equal((await post({ keys: ["grok-bot:00000000-0000-4000-8000-000000000000"] })).status, 400);
-    const ok = await post({ keys: [k] });
-    assert.equal(ok.status, 200);
-    assert.deepEqual(asked, [[k]]);
-    assert.equal((await fetch(`${base}/api/grok/status-check`, json({ keys: [k] }))).status, 401);
-  } finally {
-    server.closeAllConnections?.();
-    await new Promise((r) => server.close(r));
-  }
+test("there is no endpoint that dispatches tasks to the relay", async () => {
+  await withServer({ token: "t" }, async (base) => {
+    const res = await fetch(`${base}/api/grok/status-check`, json({ keys: ["grok-bot:15ee3b55-0ce7-4244-bed4-0d386611c815"] }, { authorization: "Bearer t" }));
+    assert.equal(res.status, 404);
+  });
+});
 
-  const bare = createServer({ store, token: "t" });
-  await new Promise((r) => bare.listen(0, "127.0.0.1", r));
-  try {
-    const res = await fetch(`http://127.0.0.1:${bare.address().port}/api/grok/status-check`, json({ keys: [k] }, { authorization: "Bearer t" }));
-    assert.equal(res.status, 503);
-  } finally {
-    bare.closeAllConnections?.();
-    await new Promise((r) => bare.close(r));
-  }
+test("Get update: the board records the ask, the agent reads it over MCP and answers with a brief", async () => {
+  await withServer({ token: "test-token" }, async (base, store) => {
+    const rpc = async (name, args) => (await (await fetch(`${base}/mcp`, json({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }, bearer("test-token")))).json()).result.structuredContent;
+    const ask = (key, headers = bearer("test-token")) => fetch(`${base}/api/tasks/${encodeURIComponent(key)}/update-request`, { method: "POST", headers });
+    const { task_key: key } = await rpc("kanban_report", { title: "富创 WAIT 抢救", status: "running", source: "grok-bot" });
+
+    assert.equal((await ask(key, {})).status, 401);
+    assert.equal((await ask("grok-bot:nope")).status, 404);
+    const res = await ask(key);
+    assert.equal(res.status, 200);
+    assert.ok((await res.json()).updateRequest.at);
+    assert.equal((await ask(key)).status, 200, "asking twice is harmless");
+    assert.equal(store.get(key).events.filter((e) => e.type === "update_request").length, 1);
+
+    assert.deepEqual((await rpc("kanban_update_requests", { source: "claude-chat" })).update_requests, []);
+    assert.equal((await rpc("kanban_update_requests", { source: "grok-bot" })).update_requests[0].task_key, key);
+    // A status-only report does not answer it, and the result tells the agent it is still owed.
+    const ping = await rpc("kanban_report", { task_key: key, status: "running", note: "第5波" });
+    assert.equal(ping.update_requests[0].task_key, key);
+
+    const done = await rpc("kanban_report", { task_key: key, status: "running", summary: "released 140 / failed 190 / pending 1780" });
+    assert.deepEqual(done.update_requests, []);
+    const task = store.get(key);
+    assert.equal(task.updateRequest, null);
+    assert.equal(task.summary, "released 140 / failed 190 / pending 1780");
+    assert.equal(task.events.at(-1).message, "released 140 / failed 190 / pending 1780");
+
+    store.apply({ key, status: "done" });
+    assert.equal((await ask(key)).status, 409);
+  });
+});
+
+test("Get update sends no network request: not to the agent, the relay or anywhere else", async () => {
+  const { default: https } = await import("node:https");
+  const outbound = [];
+  const realFetch = globalThis.fetch;
+  const realHttp = http.request, realHttpGet = http.get, realHttps = https.request, realHttpsGet = https.get;
+  const record = (via) => (...args) => { outbound.push(via); throw new Error("no network in this test"); };
+  const fetchImpl = async (url) => { outbound.push(`fetchImpl ${url}`); throw new Error("no network in this test"); };
+  await withServer({ token: "test-token", fetchImpl }, async (base, store) => {
+    store.apply({ key: "grok-bot:r1", status: "running", title: "Long job" });
+    store.apply({ key: "cursor-cloud:bc-1", status: "running", title: "Cursor job" });
+    globalThis.fetch = async (url, opts) => {
+      if (!String(url).startsWith(base)) outbound.push(`fetch ${url}`);
+      return realFetch(url, opts);
+    };
+    Object.assign(https, { request: record("https.request"), get: record("https.get") });
+    Object.assign(http, { request: record("http.request"), get: record("http.get") });
+    try {
+      for (const key of ["grok-bot:r1", "cursor-cloud:bc-1"]) {
+        const res = await realFetch(`${base}/api/tasks/${encodeURIComponent(key)}/update-request`, { method: "POST", headers: bearer("test-token") });
+        assert.equal(res.status, 200);
+      }
+      store.requestUpdate("grok-bot:r1", { by: "direct" });
+      await new Promise((r) => setTimeout(r, 50));
+    } finally {
+      globalThis.fetch = realFetch;
+      Object.assign(https, { request: realHttps, get: realHttpsGet });
+      Object.assign(http, { request: realHttp, get: realHttpGet });
+    }
+    assert.deepEqual(outbound, []);
+    assert.ok(store.get("grok-bot:r1").updateRequest);
+  });
 });

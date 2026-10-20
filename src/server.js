@@ -4,12 +4,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { timingSafeEqual } from "node:crypto";
 import { Store, publicTask } from "./store.js";
-import { COLUMNS } from "./status.js";
+import { COLUMNS, TERMINAL } from "./status.js";
 import { handleMcp } from "./mcp.js";
+import { matchSourceToken, parseSourceTokens } from "./source-tokens.js";
 import { cursorAgentEvent, verifyCursorWebhook, createCursorCloudPoller } from "./pollers/cursor-cloud.js";
-import { createGrokRelayPoller, MAX_STATUS_CHECK } from "./pollers/grok-relay.js";
-
-const GROK_TASK_KEY = /^grok-bot:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+import { createGrokRelayPoller } from "./pollers/grok-relay.js";
 import {
   createWecomClient,
   isWecomWired,
@@ -146,14 +145,16 @@ function escapeHtml(s) {
 export function createServer({
   store = new Store(),
   token = process.env.AKB_TOKEN,
+  sourceTokens = process.env.AKB_SOURCE_TOKENS,
   cursorWebhookSecret = process.env.CURSOR_WEBHOOK_SECRET,
   basePath = process.env.AKB_BASE_PATH,
   env = process.env,
   fetchImpl = globalThis.fetch,
   dataDir = dataDirFromStore(store) || env.AKB_DATA_DIR || null,
-  grok = null, // grok relay poller, for asking Grok Bot about tasks it went quiet on
 } = {}) {
   const base = (basePath || "").replace(/\/+$/, "");
+  // Per-source keys: hashes only, MCP only. Bad config fails at startup rather than silently.
+  const sourceEntries = parseSourceTokens(sourceTokens);
   const clients = new Set();
   const broadcast = (event, data) => {
     const frame = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
@@ -398,19 +399,28 @@ export function createServer({
         return send(res, 200, { ok: true });
       }
 
-      if (!authOk(req, url)) return send(res, 401, { error: "unauthorized" });
-      if (req.method !== "GET" && !originOk(req)) return send(res, 403, { error: "cross-origin write refused" });
-
+      // MCP also accepts per-source keys (Authorization header only); they report as their bound source.
       if (url.pathname === "/mcp") {
+        let principal = authOk(req, url) ? undefined : null;
+        if (principal === null) {
+          const header = req.headers.authorization || "";
+          const entry = header.startsWith("Bearer ") ? matchSourceToken(header.slice(7), sourceEntries) : null;
+          if (!entry) return send(res, 401, { error: "unauthorized" });
+          principal = { source: entry.source, agentName: entry.agentName };
+        }
+        if (req.method !== "GET" && !originOk(req)) return send(res, 403, { error: "cross-origin write refused" });
         if (req.method !== "POST") return send(res, 405, { error: "POST JSON-RPC messages to /mcp" }, { allow: "POST" });
         const msg = parseJson(await readBody(req));
         if (Array.isArray(msg)) {
-          const out = msg.map((m) => handleMcp(store, m)).filter(Boolean);
+          const out = msg.map((m) => handleMcp(store, m, principal)).filter(Boolean);
           return out.length ? send(res, 200, out) : send(res, 202);
         }
-        const out = handleMcp(store, msg);
+        const out = handleMcp(store, msg, principal);
         return out ? send(res, 200, out) : send(res, 202);
       }
+
+      if (!authOk(req, url)) return send(res, 401, { error: "unauthorized" });
+      if (req.method !== "GET" && !originOk(req)) return send(res, 403, { error: "cross-origin write refused" });
 
       if (url.pathname === "/api/stream" && req.method === "GET") {
         res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store", connection: "keep-alive" });
@@ -429,6 +439,20 @@ export function createServer({
         });
       }
 
+      // Get update: record the ask on the card. Agents read it through MCP and answer with a brief;
+      // the board itself never contacts the agent or the relay.
+      const ask = url.pathname.match(/^\/api\/tasks\/([^/]+)\/update-request$/);
+      if (ask) {
+        if (req.method !== "POST") return send(res, 405, { error: "method not allowed" }, { allow: "POST" });
+        const key = decodeURIComponent(ask[1]);
+        const task = store.get(key);
+        if (!task) return send(res, 404, { error: "not found" });
+        if (TERMINAL.has(task.status)) return send(res, 409, { error: `task is ${task.status}` });
+        if (task.placeholder) return send(res, 409, { error: "this card only groups other tasks; ask one of them" });
+        store.requestUpdate(key, { by: sessionOk(req)?.uid });
+        return send(res, 200, { ok: true, updateRequest: task.updateRequest });
+      }
+
       const one = url.pathname.match(/^\/api\/tasks\/(.+)$/);
       if (one) {
         const key = decodeURIComponent(one[1]);
@@ -438,19 +462,6 @@ export function createServer({
         }
         if (req.method === "DELETE") return store.remove(key) ? send(res, 200, { ok: true }) : send(res, 404, { error: "not found" });
         return send(res, 405, { error: "method not allowed" });
-      }
-
-      if (url.pathname === "/api/grok/status-check" && req.method === "POST") {
-        if (!grok) return send(res, 503, { error: "Grok relay is not configured on this board (GROK_RELAY_URL / GROK_RELAY_KEYS)" });
-        const body = parseJson(await readBody(req));
-        const keys = [...new Set(Array.isArray(body?.keys) ? body.keys : [])];
-        const valid = keys.length > 0 && keys.length <= MAX_STATUS_CHECK && keys.every((k) => GROK_TASK_KEY.test(k) && store.get(k));
-        if (!valid) return send(res, 400, { error: `keys must be 1-${MAX_STATUS_CHECK} grok-bot:<relayTaskId> cards on this board` });
-        try {
-          return send(res, 200, await grok.askStatus(keys));
-        } catch (err) {
-          return send(res, 502, { error: err.message });
-        }
       }
 
       if (url.pathname === "/api/events" && req.method === "POST") {

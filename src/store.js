@@ -7,7 +7,7 @@ import { normalizeStatus, TERMINAL } from "./status.js";
 const MAX_EVENTS = 200;
 const MAX_SEEN_IDS = 500;
 // A placeholder parent takes the most urgent status among its children.
-const ROLLUP_ORDER = ["waiting", "running", "queued", "review", "failed", "done"];
+const ROLLUP_ORDER = ["waiting", "running", "planning", "queued", "review", "failed", "done"];
 const KNOWN_KINDS = new Set(["cli", "ide", "cloud", "chat", "bot", "other"]);
 
 // Default kind per source, so senders can omit it.
@@ -63,6 +63,9 @@ export class Store extends EventEmitter {
     this.tasks = new Map();
     this.file = dataDir ? path.join(dataDir, "state.json") : null;
     this.saveTimer = null;
+    // Keys of cards this process created. Only these may ever be dropped automatically;
+    // every card loaded from state.json stays until someone removes it.
+    this.createdThisRun = new Set();
     if (this.file) {
       this.load();
       this.tidy();
@@ -116,6 +119,7 @@ export class Store extends EventEmitter {
         events: [], seen: new Set(),
       };
       this.tasks.set(key, task);
+      this.createdThisRun.add(key);
     }
     return task;
   }
@@ -136,16 +140,22 @@ export class Store extends EventEmitter {
     const now = cleanString(input.at, 40) && !Number.isNaN(Date.parse(input.at)) ? new Date(input.at).toISOString() : new Date().toISOString();
     const key = taskKey(cleanString(ref.source, 60), cleanString(ref.externalId, 200));
     const isNew = !this.tasks.has(key);
+    // initial_status only applies when this event creates the task (e.g. a parent mentioning a child).
+    // Validate before ensure() so a rejected event leaves no placeholder card behind.
+    const rawStatus = input.status ?? (isNew || this.tasks.get(key).placeholder ? input.initial_status : undefined);
+    const status = normalizeStatus(rawStatus);
+    if (rawStatus != null && !status) throw new Error(`unknown status: ${rawStatus}`);
     const task = this.ensure(cleanString(ref.source, 60), cleanString(ref.externalId, 200), now);
+    // Who created the card through MCP (e.g. "mcp:claude-code"); pollers and hooks leave it unset.
+    if (isNew) {
+      const createdBy = cleanString(input.created_by, 200);
+      if (createdBy) task.createdBy = createdBy;
+    }
 
     const eventId = cleanString(input.event_id, 200);
     if (eventId && task.seen.has(eventId)) return { task, changed: false };
 
     const changed = [];
-    // initial_status only applies when this event creates the task (e.g. a parent mentioning a child).
-    const rawStatus = input.status ?? (isNew || task.placeholder ? input.initial_status : undefined);
-    const status = normalizeStatus(rawStatus);
-    if (rawStatus != null && !status) throw new Error(`unknown status: ${rawStatus}`);
 
     // title_mode: "replace" (default) always sets it; "first" sets it only until a real title exists;
     // "default" is a fallback label that any later title overrides.
@@ -164,6 +174,9 @@ export class Store extends EventEmitter {
     if (status || (title && mode !== "default")) task.placeholder = false;
     const kind = cleanString(input.kind, 20);
     if (kind && KNOWN_KINDS.has(kind)) task.kind = kind;
+    // Which bot/agent on that platform did the work, e.g. "ops-bot". Cards without it show the source only.
+    const agentName = cleanString(input.agent_name, 60);
+    if (agentName) task.agentName = agentName;
     const summary = cleanString(input.summary, 4000);
     if (summary) task.summary = summary;
     const cwd = cleanString(input.cwd, 1000);
@@ -189,6 +202,7 @@ export class Store extends EventEmitter {
       }
     }
 
+    const pendingRequest = Boolean(task.updateRequest);
     // Ignore a status older than the one already shown (events can arrive out of order).
     const stale = Boolean(task.statusAt && now < task.statusAt);
     const statusChanged = Boolean(status && status !== task.status && !stale);
@@ -197,14 +211,21 @@ export class Store extends EventEmitter {
       task.status = status;
       if (status === "running" && !task.startedAt) task.startedAt = now;
       task.endedAt = TERMINAL.has(status) ? now : null;
+      if (TERMINAL.has(status)) task.updateRequest = null;
     } else if (status === "running" && !task.startedAt) {
       task.startedAt = now;
     }
 
-    const message = cleanString(input.message, 2000);
+    // A brief with no note of its own still goes on the timeline.
+    const message = cleanString(input.message, 2000) || (input.brief && pendingRequest && summary ? summary.slice(0, 2000) : undefined);
     if (message || statusChanged) {
       task.events.push({ id: eventId || randomUUID(), at: now, status: status || null, message: message || null, type: cleanString(input.type, 40) || null });
       if (task.events.length > MAX_EVENTS) task.events.splice(0, task.events.length - MAX_EVENTS);
+    }
+    // A brief written by the agent answers an open "Get update" request.
+    if (input.brief && pendingRequest && summary) {
+      task.updateRequest = null;
+      task.briefAt = now;
     }
     if (eventId) {
       task.seen.add(eventId);
@@ -218,6 +239,26 @@ export class Store extends EventEmitter {
     this.scheduleSave();
     for (const t of new Set([task, ...changed])) this.emit("change", t);
     return { task, changed: true };
+  }
+
+  // The board only records the ask; the agent picks it up through MCP (kanban_report /
+  // kanban_update_requests) and answers with a brief. Nothing is sent to the agent or the relay.
+  requestUpdate(key, { by } = {}) {
+    const task = this.tasks.get(key);
+    // A placeholder has no agent of its own to answer; its status only rolls up from children.
+    if (!task || task.placeholder) return null;
+    if (task.updateRequest) return task;
+    const at = new Date().toISOString();
+    task.updateRequest = { at, by: cleanString(by, 80) || null };
+    task.events.push({ id: randomUUID(), at, status: null, message: "Update requested from the board", type: "update_request" });
+    if (task.events.length > MAX_EVENTS) task.events.splice(0, task.events.length - MAX_EVENTS);
+    this.scheduleSave();
+    this.emit("change", task);
+    return task;
+  }
+
+  updateRequests({ source } = {}) {
+    return this.list({ source }).filter((t) => t.updateRequest).sort((a, b) => a.updateRequest.at.localeCompare(b.updateRequest.at));
   }
 
   // Recompute placeholder ancestors from their children. Returns the tasks that changed.
@@ -241,11 +282,12 @@ export class Store extends EventEmitter {
     return out;
   }
 
-  // A placeholder that lost its last child has nothing left to show.
+  // A placeholder this run created that lost its last child has nothing left to show, unless it has
+  // its own history. Cards loaded from state.json are never dropped here.
   dropOrRollup(key) {
     const p = this.tasks.get(key);
     if (!p) return;
-    if (p.placeholder && !this.children(key).length) {
+    if (p.placeholder && this.createdThisRun.has(key) && !this.children(key).length && !p.events?.length && !p.summary) {
       this.tasks.delete(key);
       this.emit("remove", [key]);
       if (p.parentKey) this.dropOrRollup(p.parentKey);
@@ -254,7 +296,8 @@ export class Store extends EventEmitter {
     }
   }
 
-  // Fix up state saved by older versions: childless placeholders, stale placeholder status.
+  // Fix up stale placeholder status in state saved by older versions. Deletes nothing at startup:
+  // dropOrRollup only drops placeholders created in this run.
   tidy() {
     for (const t of [...this.tasks.values()]) if (t.placeholder) this.dropOrRollup(t.key);
   }
