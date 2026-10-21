@@ -143,16 +143,18 @@ function badge(source, agentName, kind) {
     swatch(source), source, agentName && el("span", { class: "agent" }, `· ${agentName}`), kind && el("span", { class: "agent" }, `· ${kind}`));
 }
 
-function tree(key, depth = 0) {
+function tree(key, depth = 0, limit = true) {
   const kids = childrenOf(key);
   if (!kids.length || depth > 6) return null;
-  return el("ul", { class: "tree" }, kids.map((c) =>
+  // A summary card can hold dozens of children (e.g. promptless Codex sessions): show the newest few.
+  const shown = limit && depth === 0 && kids.length > 6 ? kids.slice(-5).reverse() : kids;
+  return el("ul", { class: "tree" }, [...shown.map((c) =>
     el("li", {},
       el("div", { class: "row", title: c.summary || c.title, onclick: (e) => { e.stopPropagation(); openTask(c.key); } },
         el("span", { class: `sdot ${c.status}`, style: `--c:var(--${c.status})` }),
         el("span", { class: "name" }, displayTitle(c)),
         el("span", { class: "src", title: STATUS_LABEL[c.status] }, who(c))),
-      tree(c.key, depth + 1))));
+      tree(c.key, depth + 1, limit))), shown !== kids && el("li", { class: "more" }, `…另有 ${kids.length - shown.length} 个，点开卡片查看`)].filter(Boolean));
 }
 
 async function pickChoice(t, value, btn) {
@@ -401,7 +403,7 @@ function renderDetail() {
     choiceBlock(t),
     links.length > 0 && el("div", { class: "links" }, links.map((l) => el("a", { href: l.url, target: "_blank", rel: "noopener noreferrer" }, l.label || l.url))),
     el("div", { class: "meta" }, meta.flatMap(([k, v]) => [el("span", {}, k), el("span", {}, v)])),
-    childrenOf(t.key).length > 0 && el("section", {}, el("h4", {}, "子任务"), tree(t.key)),
+    childrenOf(t.key).length > 0 && el("section", {}, el("h4", {}, "子任务"), tree(t.key, 0, false)),
     el("section", {}, el("h4", {}, "时间线"),
       el("ul", { class: "timeline" }, condenseTimeline(t.events).reverse().flatMap(timelineRow))),
     el("div", { class: "actions" },
