@@ -652,7 +652,9 @@ test("Get update sends no network request: not to the agent, the relay or anywhe
       Object.assign(http, { request: realHttp, get: realHttpGet });
     }
     assert.deepEqual(outbound, []);
-    assert.ok(store.get("grok-bot:r1").updateRequest);
+    // Polled cards are answered by the board from what it already pulled, still without any request.
+    assert.equal(store.get("grok-bot:r1").updateRequest, null);
+    assert.equal(store.get("cursor-cloud:bc-1").events.at(-1).type, "brief");
   });
 });
 

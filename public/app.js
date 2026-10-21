@@ -209,7 +209,7 @@ function card(t, { showParent = false, hideTree = false } = {}) {
   const attention = t.status !== "waiting" && desc.some((d) => d.status === "waiting");
   // The newest line that says something: the person's prompt, a PR, a bot's report. Not a tool call.
   const last = condenseTimeline(t.events).findLast((r) => r.kind !== "summary" && r.event.message
-    && !["update_request", "choice", "choice_clear"].includes(r.event.type))?.event.message.replace(PROMPT_PREFIX, "");
+    && !["update_request", "brief", "choice", "choice_clear"].includes(r.event.type))?.event.message.replace(PROMPT_PREFIX, "");
   const same = (a, b) => a.slice(0, 60) === b.slice(0, 60);
   const parent = (showParent || state.flat) && t.parentKey ? state.tasks.get(t.parentKey) : null;
   const stale = staleReason(t);
@@ -224,7 +224,7 @@ function card(t, { showParent = false, hideTree = false } = {}) {
     t.status === "waiting" && t.awaitingPerson && el("span", { class: "flag", title: "agent 这一轮交了产出或提了选择，等你看完回话" }, "产出待你看"),
     t.meta?.waiting_on && el("span", { class: "flag", title: "从 agent 最近的进展里推断" }, `等${t.meta.waiting_on}`),
     selfReported(t) && el("span", { class: "flag self", title: "只在 agent 通过 MCP 主动上报时更新，不走 hook 或轮询" }, "自报"),
-    t.updateRequest && el("span", { class: "flag asked", title: "等 agent 写一段进展" }, "已请求更新"),
+    askFlag(t),
     t.choice && el("span", { class: "flag chosen" }, "已选"),
   ].filter(Boolean);
   // In the needs-you lane every waiting card is listed once; hide the nested tree so a waiting child is not shown twice.
@@ -235,6 +235,7 @@ function card(t, { showParent = false, hideTree = false } = {}) {
     parent && el("div", { class: "parent-line" }, `↳ ${displayTitle(parent)}`),
     el("div", { class: "title" }, displayTitle(t)),
     t.summary && el("div", { class: "summary" }, t.summary),
+    needsYouLine(t),
     last && !t.checklist?.length && !(t.summary && same(last, t.summary)) && !same(last, displayTitle(t)) && el("div", { class: "last", title: last }, last),
     flags.length > 0 && el("div", { class: "flags" }, flags),
     outputLinks(t),
@@ -397,6 +398,7 @@ function renderDetail() {
     el("h3", { title: title !== t.title ? t.title : null }, title),
     parent && el("div", { class: "parent-line" }, "属于 ", el("a", { href: "#", onclick: (e) => { e.preventDefault(); openTask(parent.key); } }, displayTitle(parent))),
     t.summary && el("p", {}, t.summary),
+    needsYouLine(t),
     checklistBlock(t),
     choiceBlock(t),
     links.length > 0 && el("div", { class: "links" }, links.map((l) => el("a", { href: l.url, target: "_blank", rel: "noopener noreferrer" }, l.label || l.url))),
@@ -462,22 +464,57 @@ function closeControl(t) {
   ];
 }
 
-// Get update only records the ask on the card; the agent sees it the next time it talks to the
-// board over MCP and writes a brief back into the card.
+// Get update only records the ask on the card. Who can answer, and how soon, depends on the card
+// (t.updateVia, see src/update-path.js): an MCP agent the next time it calls the board, a Claude Code
+// session through its hook, the board itself for polled cards, or nobody.
+const ASK_WHO = {
+  mcp: (t) => `${t.source} 只有在那个对话里再次调用看板时才会看到；对话没人在用就不会回。`,
+  hook: (t) => `会话在跑时，它会在这一轮里写回；${t.idleSince ? "现在会话空闲，" : "会话空闲时，"}要等你回到会话里说话才会回。`,
+};
+const ASK_HINT = {
+  mcp: "约 30 分钟内回（需要那个对话还在用）",
+  hook: "会话在跑时约 10 分钟内回",
+  board: "收不到请求，看板立即用最近拉到的状态代答",
+};
+const hhmm = (iso) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+// Time left until iso, in the same words as ago().
+const until = (iso) => ago(new Date(2 * Date.now() - Date.parse(iso)).toISOString());
+const askLate = (t) => Boolean(t.updateRequest?.dueAt && Date.now() > Date.parse(t.updateRequest.dueAt));
+
+// What the agent says the person has to do (needs_you on its latest brief).
+function needsYouLine(t) {
+  return t.needsYou?.text && el("div", { class: "needs-you", title: `${since(t.needsYou.at)}写的` }, el("b", {}, "需要你："), t.needsYou.text);
+}
+
+function askFlag(t) {
+  if (!t.updateRequest) return null;
+  const due = t.updateRequest.dueAt;
+  if (askLate(t)) return el("span", { class: "flag late", title: (ASK_WHO[t.updateVia] || (() => ""))(t) }, `请求超时 ${ago(due)}`);
+  return el("span", { class: "flag asked", title: due ? `应在 ${hhmm(due)} 前回复` : "等 agent 写一段进展" }, due ? `等回复 · ${hhmm(due)} 前` : "已请求更新");
+}
+
 function updateControl(t) {
   if (t.status === "done" || t.status === "failed" || t.placeholder) return null;
+  const via = t.updateVia;
   if (t.updateRequest) {
-    return el("div", { class: "asked-note" }, `${since(t.updateRequest.at)}请求了更新。${t.source} 下次连上看板时会在这里写一段进展。`);
+    const due = t.updateRequest.dueAt;
+    const when = !due ? "" : askLate(t) ? `已超时 ${ago(due)}，还没回。` : `应在 ${hhmm(due)} 前回复（还剩 ${until(due)}）。`;
+    return el("div", { class: `asked-note${askLate(t) ? " late" : ""}` }, `${since(t.updateRequest.at)}请求了更新。${when}${(ASK_WHO[via] || (() => ""))(t)}`);
   }
-  return el("button", { class: "action", title: "请 agent 把最新进展写进这张卡", onclick: async (e) => {
-    e.target.disabled = true;
-    try {
-      await api(`api/tasks/${encodeURIComponent(t.key)}/update-request`, { method: "POST" });
-    } catch (err) {
-      e.target.disabled = false;
-      alert(`没能请求更新：${err.message}`);
-    }
-  } }, "请求更新");
+  if (via === "none") {
+    return el("div", { class: "asked-note muted" }, `${t.source} 没有接收“请求更新”的通道，按了也没人会回，所以这里不提供。`);
+  }
+  return el("span", { class: "ask" },
+    el("button", { class: "action", title: "请 agent 把最新进展写进这张卡", onclick: async (e) => {
+      e.target.disabled = true;
+      try {
+        await api(`api/tasks/${encodeURIComponent(t.key)}/update-request`, { method: "POST" });
+      } catch (err) {
+        e.target.disabled = false;
+        alert(`没能请求更新：${err.message}`);
+      }
+    } }, "请求更新"),
+    ASK_HINT[via] && el("span", { class: "ask-hint" }, ASK_HINT[via]));
 }
 
 function connect() {

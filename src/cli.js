@@ -12,6 +12,7 @@ import { claudeCodeEvents } from "./adapters/claude-code.js";
 import { cursorEvents, cursorHookResponse } from "./adapters/cursor.js";
 import { codexEvents } from "./adapters/codex.js";
 import { COLUMNS } from "./status.js";
+import { askHookOutput, asksDir, clearAsk, recordAsks } from "./asks.js";
 import { hashToken, newToken, parseSourceTokens, MIN_TOKEN_LENGTH } from "./source-tokens.js";
 
 const BASE = (process.env.AKB_URL || "http://127.0.0.1:7311").replace(/\/+$/, "");
@@ -22,7 +23,7 @@ const USAGE = `akb — cross-platform agent kanban
   akb serve [--port 7311] [--host 127.0.0.1] [--data ~/.agent-kanban] [--poll 30]
   akb hook <claude-code|cursor|codex>          adapter for agent hooks (reads stdin / argv)
   akb run [--title T] [--source S] [--parent K] -- <cmd...>  track any CLI process as a card
-  akb report --title T --status S [--key K] [--parent K] [--note N] [--source S]
+  akb report --title T --status S [--key K] [--parent K] [--note N] [--source S] [--summary S --brief [--needs-you N]]
   akb list                                     print the board
   akb mcp                                      stdio MCP bridge to the running board
   akb token-new --source S [--agent NAME]      new per-source MCP key + its AKB_SOURCE_TOKENS entry
@@ -105,6 +106,11 @@ async function cmdHook(f) {
     // Stamp now: the board orders statuses by this, since background sends can arrive out of order.
     const at = new Date().toISOString();
     if (events.length) sendInBackground(applyEnvLinks(events, rootKey).map((ev) => ({ at, ...ev })));
+    // A "请求更新" the board listed on an earlier send: hand it to the session (no network here).
+    if (adapter === claudeCodeEvents) {
+      const out = askHookOutput(payload, process.env.AKB_TASK_KEY || rootKey, { cli: fileURLToPath(import.meta.url) });
+      if (out) process.stdout.write(JSON.stringify(out));
+    }
   } catch (err) {
     if (process.env.AKB_DEBUG) console.error(`[akb] hook ${which}: ${err.message}`);
   }
@@ -130,7 +136,7 @@ function sendInBackground(events) {
 
 async function cmdSend() {
   try {
-    await post("/api/events", JSON.parse(await readStdin()), 15000);
+    recordAsks(await post("/api/events", JSON.parse(await readStdin()), 15000));
   } catch (err) {
     if (process.env.AKB_DEBUG) console.error(`[akb] send: ${err.message}`);
   }
@@ -166,7 +172,11 @@ async function cmdReport(f) {
   const out = await post("/api/events", {
     key, title: f.title, status: f.status, message: f.note, summary: f.summary,
     parent: f.parent || process.env.AKB_PARENT_KEY, url: f.url, kind: f.kind,
-  });
+    // --brief: the summary answers a "请求更新" on the card.
+    brief: f.brief && f.summary ? true : undefined,
+    needs_you: typeof f["needs-you"] === "string" ? f["needs-you"] : undefined,
+  }, 15000);
+  if (f.brief) clearAsk(asksDir(), out.key);
   console.log(out.key);
 }
 

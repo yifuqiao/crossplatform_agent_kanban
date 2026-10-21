@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { Store } from "../src/store.js";
+import { Store, publicTask } from "../src/store.js";
 import { normalizeStatus } from "../src/status.js";
 
 test("creates, updates and dedupes by event_id", () => {
@@ -134,7 +134,7 @@ test("startup never deletes a card loaded from state.json, even an empty placeho
 
 test("update requests: polled summaries do not answer them, a brief or a terminal status does", () => {
   const s = new Store();
-  s.apply({ key: "grok-bot:r1", status: "running", title: "Long job" });
+  s.apply({ key: "grok-bot:r1", status: "running", title: "Long job", created_by: "mcp:grok-bot" });
   s.requestUpdate("grok-bot:r1", { by: "yifu" });
   assert.equal(s.get("grok-bot:r1").updateRequest.by, "yifu");
   s.apply({ key: "grok-bot:r1", summary: "relay snapshot" });
@@ -147,7 +147,7 @@ test("update requests: polled summaries do not answer them, a brief or a termina
   assert.equal(s.requestUpdate("grok-bot:missing"), null);
 
   // A brief that also closes the task still lands on the timeline.
-  s.apply({ key: "grok-bot:r2", status: "running", title: "Other job" });
+  s.apply({ key: "grok-bot:r2", status: "running", title: "Other job", created_by: "mcp:grok-bot" });
   s.requestUpdate("grok-bot:r2");
   s.apply({ key: "grok-bot:r2", status: "done", summary: "final brief", brief: true });
   assert.equal(s.get("grok-bot:r2").updateRequest, null);
@@ -157,6 +157,38 @@ test("update requests: polled summaries do not answer them, a brief or a termina
   // Placeholders (cards that only group children) cannot be asked.
   s.apply({ key: "cursor-cloud:bc-1", status: "running", parent: "claude-chat:thread" });
   assert.equal(s.requestUpdate("claude-chat:thread"), null);
+});
+
+test("update requests carry a deadline by who can answer; polled cards are answered by the board at once", () => {
+  const s = new Store();
+  const now = new Date("2026-10-21T04:00:00.000Z");
+  s.apply({ key: "claude-chat:c1", status: "running", title: "Chat job", created_by: "mcp:claude-chat" });
+  s.apply({ key: "claude-code-web:session_A", status: "running", title: "Cloud session" });
+  s.apply({ key: "grok-bot:r1", status: "running", title: "Relay job", message: "第5波 released 140", at: "2026-10-21T03:50:00.000Z" });
+  s.apply({ key: "codex:x", status: "running", title: "Codex hook" });
+
+  assert.deepEqual(s.requestUpdate("claude-chat:c1", { now }).updateRequest, { at: now.toISOString(), by: null, via: "mcp", dueAt: "2026-10-21T04:30:00.000Z" });
+  assert.equal(s.requestUpdate("claude-code-web:session_A", { now }).updateRequest.dueAt, "2026-10-21T04:10:00.000Z");
+
+  const relay = s.requestUpdate("grok-bot:r1", { now });
+  assert.equal(relay.updateRequest, null, "nobody to ask: the board answers itself");
+  assert.equal(relay.briefAt, now.toISOString());
+  assert.match(relay.events.at(-1).message, /^看板代答（grok-bot 收不到请求.*10 分钟前）：Running\n最近一条：第5波 released 140$/);
+
+  assert.equal(s.requestUpdate("codex:x", { now }), null, "no path to the agent: no request");
+  assert.equal(publicTask(s.get("codex:x")).updateVia, "none");
+  assert.equal(publicTask(s.get("claude-chat:c1")).updateVia, "mcp");
+  s.apply({ source: "claude-code-web", external_id: "session_A/toolu_1", parent: "claude-code-web:session_A", status: "running" });
+  assert.equal(publicTask(s.get("claude-code-web:session_A/toolu_1")).updateVia, "none", "a subagent card has no hook call of its own");
+
+  // A brief can say what the person has to do; the next brief without it clears it.
+  s.apply({ key: "claude-chat:c1", summary: "PR 开好了，CI 绿", needs_you: "合并 PR #22", brief: true });
+  assert.equal(s.get("claude-chat:c1").needsYou.text, "合并 PR #22");
+  assert.equal(s.get("claude-chat:c1").events.at(-1).message, "PR 开好了，CI 绿\n需要你：合并 PR #22");
+  s.apply({ key: "claude-chat:c1", summary: "relay snapshot" });
+  assert.ok(s.get("claude-chat:c1").needsYou, "a polled summary is not a brief");
+  s.apply({ key: "claude-chat:c1", summary: "已合并，部署中", brief: true });
+  assert.equal(s.get("claude-chat:c1").needsYou, null);
 });
 
 test("loading old state puts turn-ended hook cards back in 进行中 and frees XML titles", () => {

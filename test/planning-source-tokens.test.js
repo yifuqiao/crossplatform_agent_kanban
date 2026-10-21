@@ -345,7 +345,7 @@ test("a per-source key only sees Get update requests on cards it can answer", as
   await withServer({}, async ({ rpc, store }) => {
     const mine = (await rpc(CLAUDE_KEY, "kanban_report", { title: "Mine", status: "running" })).body.result.structuredContent.task_key;
     store.apply({ key: "claude-code:polled", status: "running", title: "From the hook" });
-    store.apply({ key: "grok-bot:other", status: "running", title: "Other source" });
+    store.apply({ key: "grok-bot:other", status: "running", title: "Other source", created_by: "mcp:grok-bot" });
     for (const k of [mine, "claude-code:polled", "grok-bot:other"]) store.requestUpdate(k);
 
     const keys = (r) => r.body.result.structuredContent.update_requests.map((t) => t.task_key).sort();
