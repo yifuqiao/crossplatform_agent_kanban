@@ -41,6 +41,8 @@ function sourceName(env) {
   return /^[a-z0-9][a-z0-9._-]{0,59}$/.test(s) ? s : SOURCE;
 }
 
+// only_if_exists: Codex Desktop opens empty threads ahead of time and closes them unused. Their start/end
+// events must not create a card; the first real prompt does.
 function codexHookEvents(payload, env) {
   // session_id is the Codex thread id, the same one notify sends, so both land on one card.
   const sessionId = payload.session_id;
@@ -52,10 +54,6 @@ function codexHookEvents(payload, env) {
     external_id: sessionId,
     cwd: payload.cwd,
     kind: source === SOURCE ? "cli" : "cloud",
-    // A session that never gets a prompt (start/end only) is not a task of its own: the board files it
-    // under one summary card until a prompt gives it a title.
-    group: `${source}:_idle`,
-    group_title: "Codex 无内容会话",
     meta: { transcript_path: payload.transcript_path, permission_mode: payload.permission_mode, model: payload.model },
   };
   const events = [];
@@ -63,7 +61,7 @@ function codexHookEvents(payload, env) {
   switch (payload.hook_event_name) {
     case "SessionStart":
       // resume / compact / fork fire SessionStart mid-task too: initial_status leaves an existing card alone.
-      events.push({ ...base, initial_status: "queued", title: `Codex · ${folder(payload.cwd)}`, title_mode: "default", message: `Session ${payload.source || "started"}`, type: "session" });
+      events.push({ ...base, only_if_exists: true, initial_status: "queued", title: `Codex · ${folder(payload.cwd)}`, title_mode: "default", message: `Session ${payload.source || "started"}`, type: "session" });
       break;
     case "UserPromptSubmit": {
       const { text } = promptParts(stripAmbient(payload.prompt));
@@ -114,13 +112,13 @@ function codexHookEvents(payload, env) {
       break;
     case "Stop":
       // A finished turn is not finished work: the card stays in its column, marked idle, with the reply as summary.
-      events.push({ ...base, idle: true, summary: oneLine(payload.last_assistant_message, 1000) || undefined, message: "这一轮做完了，等你下一句", type: "stop", event_id: payload.turn_id ? `stop:${payload.turn_id}` : undefined });
+      events.push({ ...base, only_if_exists: true, idle: true, summary: oneLine(payload.last_assistant_message, 1000) || undefined, message: "这一轮做完了，等你下一句", type: "stop", event_id: payload.turn_id ? `stop:${payload.turn_id}` : undefined });
       break;
     case "Interrupt":
-      events.push({ ...base, idle: true, message: "这一轮被打断了", type: "stop" });
+      events.push({ ...base, only_if_exists: true, idle: true, message: "这一轮被打断了", type: "stop" });
       break;
     case "SessionEnd":
-      events.push({ ...base, status: "done", message: `Session ended${payload.reason && payload.reason !== "other" ? ` (${payload.reason})` : ""}`, type: "session" });
+      events.push({ ...base, only_if_exists: true, status: "done", message: `Session ended${payload.reason && payload.reason !== "other" ? ` (${payload.reason})` : ""}`, type: "session" });
       break;
     default:
       break;

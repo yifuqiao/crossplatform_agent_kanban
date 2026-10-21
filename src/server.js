@@ -282,8 +282,10 @@ export function createServer({
               choice_by: principal ? keyLabel(principal) : "events",
             }
           : scoped;
-        const { task, choice_rejected } = store.apply(event);
-        if (choice_rejected) {
+        const { task, choice_rejected, skipped, key: skippedKey } = store.apply(event);
+        if (skipped) {
+          results.push({ ok: true, key: skippedKey, skipped: true });
+        } else if (choice_rejected) {
           results.push({
             ok: false,
             key: task.key,
