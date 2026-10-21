@@ -31,6 +31,17 @@ function stubFetch(handler) {
   return { fetchImpl, calls };
 }
 
+test("authorizeUrl sends browsers outside WeCom to the QR-code web login", () => {
+  const client = createWecomClient({ corpId: "wwCORP", agentId: "1000030", secret: "sec", publicUrl: "https://relay.example.com/kanban" });
+  const url = new URL(client.authorizeUrl("abc123", { inWecom: false }));
+  assert.equal(url.origin + url.pathname, "https://login.work.weixin.qq.com/wwlogin/sso/login");
+  assert.equal(url.searchParams.get("login_type"), "CorpApp");
+  assert.equal(url.searchParams.get("appid"), "wwCORP");
+  assert.equal(url.searchParams.get("agentid"), "1000030");
+  assert.equal(url.searchParams.get("state"), "abc123");
+  assert.equal(url.searchParams.get("redirect_uri"), "https://relay.example.com/kanban/auth/wecom/callback");
+});
+
 test("authorizeUrl builds snsapi_base URL with agentid and redirect", () => {
   const client = createWecomClient({
     corpId: "wwCORP",

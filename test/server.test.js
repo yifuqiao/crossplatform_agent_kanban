@@ -251,7 +251,11 @@ test("wecom OAuth: state missing/mismatch → 400; bad code → 502 without sess
     fetchImpl,
   }, async (base) => {
     assert.equal((await (await fetch(`${base}/kanban/api/tasks`, { headers: bearer("t") })).json()).wecom_wired, true);
-    const { state, stateCookie } = await startOAuth(base);
+    const { state, stateCookie, loc } = await startOAuth(base);
+    // A desktop browser gets the QR-code login; the WeCom app keeps the in-app OAuth page.
+    assert.match(loc, /^https:\/\/login\.work\.weixin\.qq\.com\/wwlogin\/sso\/login\?/);
+    const inApp = await fetch(`${base}/kanban/auth/wecom/start`, { redirect: "manual", headers: { "user-agent": "Mozilla/5.0 wxwork/4.1.30 MicroMessenger/7.0.1" } });
+    assert.match(inApp.headers.get("location"), /^https:\/\/open\.weixin\.qq\.com\/connect\/oauth2\/authorize\?/);
 
     const noState = await fetch(`${base}/kanban/auth/wecom/callback?code=c`, { redirect: "manual" });
     assert.equal(noState.status, 400);

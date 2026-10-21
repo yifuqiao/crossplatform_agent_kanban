@@ -102,8 +102,21 @@ export function createWecomClient({ corpId, agentId, secret, publicUrl, fetchImp
     cached = null;
   }
 
-  function authorizeUrl(state) {
+  // Inside the WeCom app the silent OAuth page works; any other browser (a PC, ChatGPT's or Claude's
+  // sign-in window) gets "Oops! Something went wrong" there, so it is sent to the QR-code web login.
+  // Both return the same `code` to the same callback.
+  function authorizeUrl(state, { inWecom = true } = {}) {
     const redirectUri = `${publicUrl}/auth/wecom/callback`;
+    if (!inWecom) {
+      const q = new URLSearchParams({
+        login_type: "CorpApp",
+        appid: corpId,
+        agentid: String(agentId),
+        redirect_uri: redirectUri,
+        state: String(state),
+      });
+      return `https://login.work.weixin.qq.com/wwlogin/sso/login?${q.toString()}`;
+    }
     const q = new URLSearchParams({
       appid: corpId,
       redirect_uri: redirectUri,

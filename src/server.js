@@ -344,7 +344,7 @@ export function createServer({
         const safe = rawNext ? safeNextPath(rawNext, base) : "";
         const keep = rawNext && safe === rawNext ? rawNext : "";
         const { state, cookie } = issueState(cfg.sessionSecret, keep || undefined);
-        const location = client.authorizeUrl(state);
+        const location = client.authorizeUrl(state, { inWecom: /\bwxwork\//i.test(req.headers["user-agent"] || "") });
         res.writeHead(302, {
           location,
           "set-cookie": cookieHeader(STATE_COOKIE, cookie, { ...cookiePathOpts(), maxAge: STATE_TTL_MS / 1000 }),

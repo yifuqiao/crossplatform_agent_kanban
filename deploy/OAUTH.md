@@ -46,6 +46,7 @@ Claude iPhone 应用可以**使用**已经连上的自定义 connector；添加�
 
 - `AKB_PUBLIC_URL` 必须继续是 `https://relay.onetopway.com/kanban`（https，不要尾部斜杠）。OAuth 的 issuer 和企微登录的回调都用这一个地址，两边要保持一致，不要为 OAuth 另设一个 URL。
 - `AKB_BASE_PATH=/kanban`。
+- 企业微信登录：在企业微信 App 里打开时走 App 内授权；在电脑浏览器（包括 ChatGPT、Claude 弹出的登录窗口）里打开时跳企业微信**扫码登录**。扫码登录要在企业微信管理后台 → 应用管理 → 这个应用（`AKB_WECOM_AGENT_ID`）→ 企业微信授权登录 → Web 网页，把授权回调域设成 `relay.onetopway.com`。
 - `AKB_OAUTH_SOURCES`：企业微信同意页允许点选的来源名，逗号分隔。不设时只有 `claude-code`。不要把 `grok-bot` 加进去，除非确实要让登录用户代那个来源发令牌。只配了 `@bot` 钥匙的来源会按 bot 出现，令牌带上这个 bot。
 - `AKB_SOURCE_TOKENS` 里至少有一条不带 `@bot` 的 `claude-code:<sha256>`，同意页才列得出 `claude-code`，贴钥匙才能对上。
   生成：在服务器上 `akb token-new --source claude-code`，钥匙只私下给，哈希写进 env。
