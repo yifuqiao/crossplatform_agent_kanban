@@ -65,6 +65,7 @@ button, input { font: inherit; }
 .flags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
 .flag { font-size: 11px; border-radius: 4px; padding: 0 6px; background: color-mix(in srgb, var(--f, var(--waiting)) 14%, transparent); color: var(--f, var(--waiting)); font-weight: 500; white-space: nowrap; }
 .flag.silent { --f: var(--failed); }
+.flag.idle { --f: var(--muted); }
 .flag.asked { --f: var(--running); }
 .flag.chosen { --f: var(--done); }
 .flag.self { --f: var(--muted); }
@@ -131,3 +132,10 @@ button, input { font: inherit; }
   .column { flex: 0 0 86%; min-width: 0; scroll-snap-align: start; }
   .column.empty { display: none; }
 }
+
+.checklist { list-style: none; margin: 6px 0 0; padding: 0; font-size: 12px; }
+.checklist li { display: flex; gap: 6px; line-height: 1.5; color: var(--text); }
+.checklist li .mark { flex: none; width: 1em; text-align: center; }
+.checklist li.done { color: var(--muted); }
+.checklist li.done .mark { color: var(--done); }
+.checklist li.doing .mark { color: var(--running); }

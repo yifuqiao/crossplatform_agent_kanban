@@ -46,7 +46,7 @@ EOF
     try { s = JSON.parse(fs.readFileSync(SETTINGS, "utf8")); } catch (e) { if (e.code !== "ENOENT") throw e; }
     s.hooks ||= {};
     const ours = (g) => (g.hooks || []).some((h) => h.command?.includes(".agent-kanban/hook.sh"));
-    const events = { SessionStart: null, UserPromptSubmit: null, PreToolUse: "*", PostToolUse: "Task|Agent|mcp__.*__set_thread_resolved",
+    const events = { SessionStart: null, UserPromptSubmit: null, PreToolUse: "*", PostToolUse: "Task|Agent|Bash|TodoWrite|mcp__.*__(set_thread_resolved|rename_thread|set_session_title|create_pull_request|update_progress_checklist)",
       Notification: null, Stop: null, SessionEnd: null };
     for (const [ev, matcher] of Object.entries(events)) {
       const groups = (s.hooks[ev] || []).filter((g) => !ours(g));

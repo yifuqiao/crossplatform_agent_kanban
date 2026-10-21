@@ -158,3 +158,34 @@ test("update requests: polled summaries do not answer them, a brief or a termina
   s.apply({ key: "cursor-cloud:bc-1", status: "running", parent: "claude-chat:thread" });
   assert.equal(s.requestUpdate("claude-chat:thread"), null);
 });
+
+test("loading old state puts turn-ended hook cards back in 进行中 and frees XML titles", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "akb-migrate-"));
+  const at = "2026-10-20T10:00:00.000Z";
+  const card = (key, status, type, title) => ({
+    key, source: key.split(":")[0], externalId: key.split(":")[1], title, titled: true, status, links: [], meta: {},
+    createdAt: at, updatedAt: at, events: [{ id: key, at, status, message: "m", type }], seen: [],
+  });
+  fs.writeFileSync(path.join(dir, "state.json"), JSON.stringify({ version: 1, tasks: [
+    card("claude-code-web:a", "review", "stop", '<wake reason="spawn" current-time="2026'),
+    card("claude-code-web:b", "review", "pr", "Open PR"),
+    card("cursor:c", "review", "stop", "cursor turn"),
+    { ...card("claude-code-web:d", "review", "stop", '<wake reason="mention" current-time="2026'),
+      events: [
+        { id: "d1", at, status: "running", message: 'Prompt: <wake reason="mention"><project><thread><message trigger="true" from="human" author="Yifu">把卡片标题改好', type: "prompt" },
+        ...Array.from({ length: 8 }, (_, i) => ({ id: `d${i + 2}`, at, status: "running", message: null, type: null })),
+        { id: "d9", at, status: "review", message: "m", type: "stop" },
+      ] },
+  ] }));
+  const s = new Store({ dataDir: dir });
+  assert.equal(s.get("claude-code-web:a").status, "running");
+  assert.equal(s.get("claude-code-web:a").idleSince, at);
+  assert.equal(s.get("claude-code-web:a").titled, false);
+  assert.equal(s.get("claude-code-web:b").status, "review");
+  // Recovered on the server from an old prompt, not only in the browser from the last few events.
+  assert.equal(s.get("claude-code-web:d").title, "把卡片标题改好");
+  assert.equal(s.get("claude-code-web:d").status, "running");
+  assert.equal(s.get("cursor:c").status, "review");
+  s.apply({ key: "claude-code-web:a", title: "真正的标题", title_mode: "first" });
+  assert.equal(s.get("claude-code-web:a").title, "真正的标题");
+});
