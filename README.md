@@ -87,6 +87,7 @@ curl -fsSL https://raw.githubusercontent.com/yifuqiao/crossplatform_agent_kanban
 
 把 [`examples/codex-config.toml`](examples/codex-config.toml) 里的 hooks 加进 `~/.codex/config.toml`（Windows 是 `%USERPROFILE%\.codex\config.toml`），
 环境变量里设 `AKB_URL=https://<看板地址>` 和 `AKB_SOURCE_KEY`（`akb token-new --source codex` 生成的钥匙）。
+Windows 上 Codex 用 PowerShell 跑 hook 命令，命令不能以带引号的路径开头（比如 `"C:\Program Files\nodejs\node.exe" ...`），否则会被当成普通字符串、一声不响地不执行；用 PATH 里的程序名开头，比如 `node ...`。
 Codex 只运行你信任过的 hook：第一次在 Codex 里打开 `/hooks`，把这些 hook 标为信任；改过 hook 要重新信任。
 
 | Hook | 看板上 |
