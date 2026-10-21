@@ -262,9 +262,16 @@ function cardsForColumn(colId, rootVisible) {
 }
 
 // Cards split by when they were last heard from (the time shown on the card): 今天, 昨天, 历史.
-// 今天 is open by default, 昨天 and 历史 are folded; a click flips one group. Finished columns still show
-// the newest few per open group, with the rest one click away.
+// Which groups start open depends on the column: 进行中 opens all; 排队/规划中/审核中 open all while the column
+// holds at most FEW_CARDS, otherwise only 今天; 完成/失败 open only 今天. A click flips one group. Finished
+// columns still show the newest few per open group, with the rest one click away.
 const DAY_GROUPS = [{ id: "today", label: "今天", open: true }, { id: "yesterday", label: "昨天" }, { id: "older", label: "历史" }];
+const FEW_CARDS = 6;
+function openByDefault(colId, group, total) {
+  if (group.open || colId === "running") return true;
+  if (colId === "queued" || colId === "planning" || colId === "review") return total <= FEW_CARDS;
+  return false;
+}
 function dayGroups(colId, cards) {
   const now = new Date();
   const today = dayKey(now);
@@ -278,7 +285,7 @@ function dayGroups(colId, cards) {
     const list = cards.filter((t) => groupOf(t) === g.id);
     if (!list.length) return null;
     const id = `${colId}|${g.id}`;
-    const open = Boolean(g.open) !== state.toggled.has(id);
+    const open = openByDefault(colId, g, cards.length) !== state.toggled.has(id);
     const shown = finished && !state.expanded.has(id) ? list.slice(0, FINISHED_LIMIT) : list;
     return el("div", { class: `day${open ? " open" : ""}`, "data-keys": list.map((t) => t.key).join(" ") },
       el("button", { class: "day-head", "aria-expanded": String(open), title: open ? "点击折叠" : "点击展开",
