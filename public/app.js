@@ -21,8 +21,8 @@ if (params.has("token")) {
 const withToken = (u) => (token ? `${u}${u.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}` : u);
 const inWxWork = /wxwork/i.test(navigator.userAgent || "");
 
-// expanded: "col|group" day groups whose finished-card limit was lifted. toggled: "col|group" groups whose fold differs from the default (今天 open, 昨天/历史 folded).
-const state = { tasks: new Map(), columns: [], hidden: new Set(), query: "", flat: false, showStale: false, open: null, expanded: new Set(), toggled: new Set() };
+// expanded: "col|group" day groups whose finished-card limit was lifted. folds: "col|group" → open (true/false) the person last clicked; groups not in it use their column default.
+const state = { tasks: new Map(), columns: [], hidden: new Set(), query: "", flat: false, showStale: false, open: null, expanded: new Set(), folds: new Map() };
 const STALE_MS = 24 * 3600 * 1000;
 // A running/planning card with no event for this long is flagged on the board (still shown).
 const SILENT_MS = 30 * 60 * 1000;
@@ -285,11 +285,11 @@ function dayGroups(colId, cards) {
     const list = cards.filter((t) => groupOf(t) === g.id);
     if (!list.length) return null;
     const id = `${colId}|${g.id}`;
-    const open = openByDefault(colId, g, cards.length) !== state.toggled.has(id);
+    const open = state.folds.get(id) ?? openByDefault(colId, g, cards.length);
     const shown = finished && !state.expanded.has(id) ? list.slice(0, FINISHED_LIMIT) : list;
     return el("div", { class: `day${open ? " open" : ""}`, "data-keys": list.map((t) => t.key).join(" ") },
       el("button", { class: "day-head", "aria-expanded": String(open), title: open ? "点击折叠" : "点击展开",
-        onclick: () => { state.toggled.has(id) ? state.toggled.delete(id) : state.toggled.add(id); render(); } },
+        onclick: () => { state.folds.set(id, !open); render(); } },
         el("span", { class: "caret" }, open ? "▾" : "▸"), g.label, el("span", { class: "n" }, list.length)),
       open && shown.map((t) => card(t)),
       open && list.length > shown.length && el("button", { class: "more", onclick: () => { state.expanded.add(id); render(); } }, `再显示 ${list.length - shown.length} 张`));
