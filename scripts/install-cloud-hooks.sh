@@ -38,12 +38,12 @@ install() {
 
   # Skip when the opened repo ships its own board hooks (this repo does), so one session makes one card.
   # Cloud containers start from a snapshot taken after the setup script ran, so this copy can be days
-  # behind main: at most every 6 hours, re-run the installer in the background (the hook never waits on it).
+  # behind main: at most once an hour, re-run the installer in the background (the hook never waits on it).
   cat > "$HOME_DIR/hook.sh" <<EOF
 #!/usr/bin/env bash
 d="\${CLAUDE_PROJECT_DIR:-.}/.claude"
 if grep -qs 'hook claude-code' "\$d/settings.json" "\$d/settings.local.json"; then cat >/dev/null; exit 0; fi
-if [ -f "$HOME_DIR/install.sh" ] && [ -n "\$(find "$HOME_DIR/akb/package.json" -mmin +360 2>/dev/null)" ]; then
+if [ -f "$HOME_DIR/install.sh" ] && [ -n "\$(find "$HOME_DIR/akb/package.json" -mmin +60 2>/dev/null)" ]; then
   touch "$HOME_DIR/akb/package.json"
   AKB_REPO="$REPO" AKB_REF="$REF" AKB_HOME="$HOME_DIR" CLAUDE_SETTINGS="$SETTINGS" \\
     nohup bash "$HOME_DIR/install.sh" </dev/null >/dev/null 2>&1 &
