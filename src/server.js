@@ -9,6 +9,7 @@ import { handleMcp } from "./mcp.js";
 import { matchSourceToken, parseSourceTokens } from "./source-tokens.js";
 import { cursorAgentEvent, verifyCursorWebhook, createCursorCloudPoller } from "./pollers/cursor-cloud.js";
 import { createGrokRelayPoller } from "./pollers/grok-relay.js";
+import { createSessionSweeper } from "./pollers/session-sweep.js";
 import {
   createWecomClient,
   isWecomWired,
@@ -661,7 +662,9 @@ export function startPollers(pollers, intervalMs, log = console) {
 }
 
 export function pollersFromEnv(store, env = process.env) {
-  const pollers = [];
+  // Always on: closes hook session cards nobody has talked to for hours (AKB_SESSION_QUIET_HOURS, default 6; 0 turns it off).
+  const quietHours = env.AKB_SESSION_QUIET_HOURS == null || env.AKB_SESSION_QUIET_HOURS === "" ? 6 : Number(env.AKB_SESSION_QUIET_HOURS);
+  const pollers = quietHours > 0 ? [createSessionSweeper({ store, quietMs: quietHours * 3600 * 1000 })] : [];
   const cursorKey = env.CURSOR_API_KEY;
   if (cursorKey) pollers.push(createCursorCloudPoller({ store, apiKey: cursorKey }));
   if (env.GROK_RELAY_URL && env.GROK_RELAY_KEYS) {

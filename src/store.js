@@ -482,6 +482,14 @@ export class Store extends EventEmitter {
         else t.titled = false;
         dirty = true;
       }
+      // Older hooks wrote raw wake / task-notification XML as the person's prompt; the card face shows it.
+      for (const e of t.events || []) {
+        if (e.type !== "prompt" || typeof e.message !== "string" || !junkTitle(e.message.replace(/^Prompt: /, ""))) continue;
+        const words = recoverTitle(e.message);
+        if (words) e.message = `Prompt: ${words}`;
+        else Object.assign(e, { type: "relay", message: "转来: 系统消息" });
+        dirty = true;
+      }
     }
     if (dirty) this.scheduleSave();
   }

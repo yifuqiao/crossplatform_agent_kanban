@@ -10,7 +10,7 @@ const ENTITIES = { lt: "<", gt: ">", amp: "&", quot: '"', "#39": "'", apos: "'" 
 
 // Claude project threads wrap every prompt in <wake>/<relay>/<session-context> XML (sometimes
 // entity-escaped), and an attached file puts @"path" in front; a card titled with that is unreadable.
-const ENVELOPE = /^\s*(<|&lt;)(wake|coordinator-relay|relay|system-reminder|session-context)\b/i;
+const ENVELOPE = /^\s*(<|&lt;)(wake|coordinator-relay|relay|system-reminder|session-context|task-notification)\b/i;
 const ATTACHMENTS = /^(\s*@(?:"[^"]*"|\S+))+\s*/;
 const QUOTED_ATTACHMENTS = /^(\s*@"[^"]*")+\s*/;
 
@@ -29,7 +29,7 @@ export function promptParts(prompt) {
   if (!ENVELOPE.test(body)) return { text: prompt.replace(QUOTED_ATTACHMENTS, "") || prompt, human: true };
   const s = body
     .replace(/&(lt|gt|amp|quot|#39|apos);/g, (_, e) => ENTITIES[e])
-    .replace(/<(system-reminder|system-note|session-context|untrusted-uploads)\b[^>]*>[\s\S]*?<\/\1\b[^>]*>/gi, " ");
+    .replace(/<(system-reminder|system-note|session-context|untrusted-uploads|task-notification)\b[^>]*>[\s\S]*?<\/\1\b[^>]*>/gi, " ");
   const pick = (re) => [...s.matchAll(re)].map((m) => m[1].replace(/<[^>]+>/g, " ").trim()).find(Boolean);
   const human = pick(/<cited\b[^>]*author="user"[^>]*>([\s\S]*?)<\/cited>/gi)
     || pick(/<message\b[^>]*trigger="true"[^>]*from="human"[^>]*>([\s\S]*?)<\/message>/gi)
@@ -46,7 +46,7 @@ export function recoverTitle(text) {
   const body = text.replace(/^Prompt: /, "").replace(ATTACHMENTS, "");
   if (!ENVELOPE.test(body)) return "";
   const s = body.replace(/&(lt|gt|amp|quot|#39|apos);/g, (_, e) => ENTITIES[e])
-    .replace(/<(system-reminder|system-note|session-context|untrusted-uploads)\b[^>]*>[\s\S]*?<\/\1\b[^>]*>/gi, " ");
+    .replace(/<(system-reminder|system-note|session-context|untrusted-uploads|task-notification)\b[^>]*>[\s\S]*?<\/\1\b[^>]*>/gi, " ");
   const m = /<cited\b[^>]*author="user"[^>]*>([^<]+)/i.exec(s) || /<message\b[^>]*from="human"[^>]*>([^<]+)/i.exec(s);
   return m ? oneLine(m[1], 100) : "";
 }

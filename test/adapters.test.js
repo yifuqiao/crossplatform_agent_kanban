@@ -320,3 +320,20 @@ test("AKB_CODEX_SOURCE puts Codex cloud sessions under their own source", () => 
   feed(s, codexEvents, [{ session_id: "c2", hook_event_name: "UserPromptSubmit", prompt: "x" }], { AKB_CODEX_SOURCE: "Bad Source!" });
   assert.ok(s.get("codex:c2"));
 });
+
+test("a background notification wakes a Claude card without a prompt line or answering 等您", () => {
+  const s = new Store();
+  const base = { session_id: "s5", cwd: "/w" };
+  feed(s, claudeCodeEvents, [
+    { ...base, hook_event_name: "UserPromptSubmit", prompt: "写个文档" },
+    { ...base, hook_event_name: "PostToolUse", tool_name: "mcp__hearthbot__post_message", tool_input: { text: "好了", attached_outputs: [{ kind: "link", ref: "https://example.com/doc", title: "文档" }] } },
+    { ...base, hook_event_name: "Stop" },
+  ]);
+  assert.equal(s.get("claude-code:s5").status, "waiting");
+  feed(s, claudeCodeEvents, [{ ...base, hook_event_name: "UserPromptSubmit", prompt: "<task-notification>\n<task-type>queued-remote-notifications</task-type>\n</task-notification>" }]);
+  const card = s.get("claude-code:s5");
+  assert.equal(card.title, "写个文档");
+  assert.ok(!card.events.some((e) => /task-notification/.test(e.message || "")));
+  feed(s, claudeCodeEvents, [{ ...base, hook_event_name: "Stop" }]);
+  assert.equal(s.get("claude-code:s5").status, "waiting");
+});

@@ -42,6 +42,7 @@ MCP 地址是 `https://relay.onetopway.com/kanban/mcp`，Cursor webhook 是 `htt
 - 卡片标签显示来源；上报时带了 `agent_name` 的，显示成「grok-bot · ops-bot」，详情页也有 Agent 一栏。
 - 卡片下方的小标签汇总子活动状态（例如 `2 Running · 1 Needs you`）。**任何一层子活动在等你，整张卡会被橙色描边**，即使父任务本身还在 Running。
 - 勾选 “Sub-tasks as cards” 可以把子活动也平铺成独立卡片，按各自状态分列。
+- **会话卡自动收起**：Claude Code、Codex、Cursor 的 hook 会话卡（不含通过 MCP 自报的卡、等您的卡）6 小时没有任何动静就自动移到完成，时间线写明原因；在那个会话里再说话会回到进行中。`AKB_SESSION_QUIET_HOURS` 改小时数，设成 `0` 关闭。
 - 点卡片看时间线、链接（PR、Cursor agent 页面）、元数据和完整的嵌套树。
 
 ## 接入各个 agent
