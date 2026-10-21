@@ -152,7 +152,7 @@ Grok Bot 不需要额外往看板上报，也不需要 MCP：看板只读 relay�
 | 卡的来路 | 谁来回 | 时限 |
 | --- | --- | --- |
 | 通过看板 MCP 建的卡 | agent 下次调用 `kanban_report`（返回值里的 `update_requests`）或 `kanban_update_requests` 时看到，用带 `summary` 的 `kanban_report` 回写 | 30 分钟；那个对话没人在用就不会回 |
-| Claude Code hook 卡（`claude-code` / `claude-code-web`） | hook 下次上报时拿到请求，在会话的下一次工具调用或这一轮结束时交给会话；会话用 `akb report --key K --brief --summary ...` 回写 | 10 分钟；会话空闲时要等你回到会话说话 |
+| Claude Code hook 会话卡（`claude-code` / `claude-code-web`，子代理卡除外） | hook 下次上报时拿到请求，在会话的下一次工具调用或这一轮结束时交给会话；会话用 `akb report --key K --brief --summary ...` 回写 | 10 分钟；会话空闲时要等你回到会话说话 |
 | 看板轮询的卡（`grok-bot`、`cursor-cloud`） | 对方收不到请求，看板立即用最近拉到的状态代答 | 立即 |
 | 其他（Cursor / Codex hook、`akb run`、手动上报） | 没有通道 | 不显示按钮，接口返回 409 |
 

@@ -178,6 +178,8 @@ test("update requests carry a deadline by who can answer; polled cards are answe
   assert.equal(s.requestUpdate("codex:x", { now }), null, "no path to the agent: no request");
   assert.equal(publicTask(s.get("codex:x")).updateVia, "none");
   assert.equal(publicTask(s.get("claude-chat:c1")).updateVia, "mcp");
+  s.apply({ source: "claude-code-web", external_id: "session_A/toolu_1", parent: "claude-code-web:session_A", status: "running" });
+  assert.equal(publicTask(s.get("claude-code-web:session_A/toolu_1")).updateVia, "none", "a subagent card has no hook call of its own");
 
   // A brief can say what the person has to do; the next brief without it clears it.
   s.apply({ key: "claude-chat:c1", summary: "PR 开好了，CI 绿", needs_you: "合并 PR #22", brief: true });

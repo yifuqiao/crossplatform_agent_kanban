@@ -306,7 +306,9 @@ export function createServer({
     const update_requests = [...new Set(results.filter((r) => r.ok).map((r) => r.key))]
       .map((k) => store.get(k)).filter((t) => t?.updateRequest)
       .map((t) => ({ task_key: t.key, requested_at: t.updateRequest.at, due_at: t.updateRequest.dueAt || null }));
-    return send(res, status, Array.isArray(body) ? { results, update_requests } : { ...results[0], update_requests });
+    // at: replies can reach the hook out of order; it ignores one older than what it already knows.
+    const at = new Date().toISOString();
+    return send(res, status, Array.isArray(body) ? { results, update_requests, at } : { ...results[0], update_requests, at });
   }
 
   const server = http.createServer(async (req, res) => {

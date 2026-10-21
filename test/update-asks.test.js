@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { Store } from "../src/store.js";
 import { createServer } from "../src/server.js";
 import { hashToken } from "../src/source-tokens.js";
-import { askHookOutput, readAsk, recordAsks } from "../src/asks.js";
+import { askHookOutput, clearAsk, readAsk, recordAsks } from "../src/asks.js";
 
 const CLI = fileURLToPath(new URL("../src/cli.js", import.meta.url));
 // Test-only keys; real keys never appear in the repo.
@@ -50,11 +50,29 @@ test("asks: the board's reply is kept per card and handed to the session once", 
   assert.match(out.hookSpecificOutput.additionalContext, /node "\/x\/cli\.js" report --key "claude-code-web:session_A" --brief --summary/);
   assert.equal(askHookOutput({ hook_event_name: "Stop" }, key, { dir, cli: "/x/cli.js" }), null, "told once");
 
-  // The same request again changes nothing; a reply without it clears the file.
+  // The same request again changes nothing; a reply made after it without it closes it.
   recordAsks({ ok: true, key, update_requests: [{ task_key: key, requested_at: "2026-10-21T04:00:00.000Z" }] }, dir);
   assert.ok(readAsk(dir, key).notified_at);
-  recordAsks({ results: [{ ok: true, key }], update_requests: [] }, dir);
-  assert.equal(readAsk(dir, key), null);
+  recordAsks({ results: [{ ok: true, key }], update_requests: [], at: "2026-10-21T04:05:00.000Z" }, dir);
+  assert.equal(readAsk(dir, key).done, true);
+});
+
+test("asks: replies that arrive out of order neither drop a new ask nor bring back an answered one", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "akb-asks-"));
+  const key = "claude-code-web:session_B";
+  const asked = { task_key: key, requested_at: "2026-10-21T04:00:00.000Z" };
+  recordAsks({ ok: true, key, update_requests: [asked], at: "2026-10-21T04:00:05.000Z" }, dir);
+  // A reply made before the click, delivered late.
+  recordAsks({ ok: true, key, update_requests: [], at: "2026-10-21T03:59:59.000Z" }, dir);
+  assert.equal(readAsk(dir, key).done, false);
+  // The session answers; a late reply that still lists the ask does not reopen it.
+  clearAsk(dir, key);
+  recordAsks({ ok: true, key, update_requests: [asked], at: "2026-10-21T04:00:07.000Z" }, dir);
+  assert.equal(readAsk(dir, key).done, true);
+  assert.equal(askHookOutput({ hook_event_name: "Stop" }, key, { dir, cli: "/x/cli.js" }), null);
+  // A newer request is a new ask.
+  recordAsks({ ok: true, key, update_requests: [{ ...asked, requested_at: "2026-10-21T05:00:00.000Z" }] }, dir);
+  assert.ok(askHookOutput({ hook_event_name: "Stop" }, key, { dir, cli: "/x/cli.js" }));
 });
 
 test("Get update on a cloud Claude Code card reaches the session through its hook and comes back as a brief", async () => {
@@ -84,7 +102,8 @@ test("Get update on a cloud Claude Code card reaches the session through its hoo
     assert.equal(store.get(key).updateRequest, null);
     assert.equal(store.get(key).summary, "导出修好一半，下一步补测试");
     assert.equal(store.get(key).needsYou.text, "确认导出格式");
-    assert.deepEqual(fs.readdirSync(path.join(home, "asks")), []);
+    const [tomb] = fs.readdirSync(path.join(home, "asks"));
+    assert.equal(JSON.parse(fs.readFileSync(path.join(home, "asks", tomb), "utf8")).done, true);
   });
 });
 

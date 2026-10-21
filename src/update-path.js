@@ -16,7 +16,8 @@ const POLLED_SOURCES = new Set(["grok-bot", "cursor-cloud"]);
 export function updatePath(task) {
   if (!task || task.placeholder || TERMINAL.has(task.status)) return null;
   if (task.createdBy?.startsWith("mcp:")) return "mcp";
-  if (HOOK_SOURCES.has(task.source)) return "hook";
+  // Only the session card itself: a subagent's card never gets its own hook call to carry the ask.
+  if (HOOK_SOURCES.has(task.source)) return String(task.externalId).includes("/") ? "none" : "hook";
   if (POLLED_SOURCES.has(task.source)) return "board";
   return "none";
 }
