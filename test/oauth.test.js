@@ -257,6 +257,7 @@ test("discovery documents and the /mcp 401 challenge point under /kanban", async
     assert.equal(asBody.registration_endpoint, `${PUBLIC}/oauth/register`);
     assert.equal(asBody.revocation_endpoint, `${PUBLIC}/oauth/revoke`);
     assert.deepEqual(asBody.code_challenge_methods_supported, ["S256"]);
+    assert.equal(asBody.authorization_response_iss_parameter_supported, true);
     assert.deepEqual(asBody.token_endpoint_auth_methods_supported, ["none"]);
     assert.ok(asBody.grant_types_supported.includes("authorization_code"));
     assert.ok(asBody.grant_types_supported.includes("refresh_token"));
@@ -429,6 +430,43 @@ test("bad redirect is not followed; plain PKCE and a mismatched redirect_uri are
     const code = await codeFor(base, clientId, { verifier: pair.verifier, challenge: pair.challenge, sourceKey: CLAUDE_KEY });
     const swapped = await exchange(base, { clientId, code, verifier: pair.verifier, redirect: REDIRECT_COM });
     assert.equal(swapped.body.error, "invalid_grant");
+  });
+});
+
+test("ChatGPT: stable redirect registers, and every authorization response carries iss (RFC 9207)", async () => {
+  const CHATGPT = "https://chatgpt.com/connector_platform_oauth_redirect";
+  const CHATGPT_KEY = "test-chatgpt-key-0003-padded-to-32-chars";
+  await withOauth({ sourceTokens: `${SOURCE_TOKENS},chatgpt:${hashToken(CHATGPT_KEY)}` }, async ({ base }) => {
+    const reg = await registerClient(base, [CHATGPT]);
+    assert.equal(reg.status, 201);
+    const clientId = reg.body.client_id;
+
+    const { challenge } = pkcePair();
+    const plain = await authorizePage(base, clientId, { challenge, method: "plain", redirect: CHATGPT });
+    assert.equal(plain.status, 302);
+    const err = new URL(plain.location);
+    assert.equal(err.origin + err.pathname, CHATGPT);
+    assert.equal(err.searchParams.get("error"), "invalid_request");
+    assert.equal(err.searchParams.get("iss"), PUBLIC);
+
+    const pair = pkcePair();
+    const page = await authorizePage(base, clientId, { challenge: pair.challenge, redirect: CHATGPT, resource: `${PUBLIC}/mcp` });
+    assert.equal(page.status, 200);
+    const post = await postConsent(base, { resume: page.resume, csrfCookie: page.csrfCookie, sourceKey: CHATGPT_KEY });
+    assert.equal(post.status, 302);
+    const ok = new URL(post.location);
+    assert.equal(ok.origin + ok.pathname, CHATGPT);
+    assert.equal(ok.searchParams.get("iss"), PUBLIC);
+    assert.equal(ok.searchParams.get("state"), "st-1");
+
+    const tok = await exchange(base, { clientId, code: post.code, verifier: pair.verifier, redirect: CHATGPT, resource: `${PUBLIC}/mcp` });
+    assert.equal(tok.status, 200);
+    assert.equal(tok.body.scope, "chatgpt offline_access");
+    const created = await mcp(base, tok.body.access_token, "tools/call", {
+      name: "kanban_report",
+      arguments: { title: "From ChatGPT", status: "running" },
+    });
+    assert.match(created.body.result.structuredContent.task_key, /^chatgpt:/);
   });
 });
 
@@ -762,7 +800,7 @@ test("WeCom consent lists only AKB_OAUTH_SOURCES and keeps agent-bound keys boun
     assert.equal(page.status, 200);
     assert.equal(page.xfo, "DENY");
     assert.match(page.csp, /frame-ancestors 'none'/);
-    assert.match(page.html, /「只在你自己刚在 Claude 里点了连接时才允许」/);
+    assert.match(page.html, /「只在你自己刚在 Claude 或 ChatGPT 里点了连接时才允许」/);
     assert.match(page.html, new RegExp(clientId.slice(0, 8)));
     assert.equal(page.html.includes(clientId), false);
     assert.match(page.html, /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);

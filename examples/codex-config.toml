@@ -1,2 +1,73 @@
-# ~/.codex/config.toml — Codex calls this after every agent turn with a JSON argument.
-notify = ["akb", "hook", "codex"]
+# ~/.codex/config.toml (Windows: %USERPROFILE%\.codex\config.toml)
+#
+# Lifecycle hooks: the board card follows the whole Codex session —
+# 进行中 when you send a prompt, 等您 when Codex asks for approval, idle with the last reply when a
+# turn ends, subagents as child cards, 审核中 after `gh pr create`, 完成 when the session ends.
+# `akb hook codex` reads the hook JSON on stdin, sends in the background and never blocks Codex.
+# It reads AKB_URL and AKB_SOURCE_KEY (a key made with `akb token-new --source codex`) from the environment.
+#
+# Codex runs a new or changed hook only after you trust it: open `/hooks` in Codex once and trust these.
+
+[[hooks.SessionStart]]
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = "akb hook codex"
+timeout = 5
+
+[[hooks.UserPromptSubmit]]
+[[hooks.UserPromptSubmit.hooks]]
+type = "command"
+command = "akb hook codex"
+timeout = 5
+
+[[hooks.PreToolUse]]
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "akb hook codex"
+timeout = 5
+
+[[hooks.PermissionRequest]]
+[[hooks.PermissionRequest.hooks]]
+type = "command"
+command = "akb hook codex"
+timeout = 5
+
+[[hooks.PostToolUse]]
+[[hooks.PostToolUse.hooks]]
+type = "command"
+command = "akb hook codex"
+timeout = 5
+
+[[hooks.SubagentStart]]
+[[hooks.SubagentStart.hooks]]
+type = "command"
+command = "akb hook codex"
+timeout = 5
+
+[[hooks.SubagentStop]]
+[[hooks.SubagentStop.hooks]]
+type = "command"
+command = "akb hook codex"
+timeout = 5
+
+[[hooks.Stop]]
+[[hooks.Stop.hooks]]
+type = "command"
+command = "akb hook codex"
+timeout = 5
+
+[[hooks.Interrupt]]
+[[hooks.Interrupt.hooks]]
+type = "command"
+command = "akb hook codex"
+timeout = 5
+
+[[hooks.SessionEnd]]
+[[hooks.SessionEnd.hooks]]
+type = "command"
+command = "akb hook codex"
+timeout = 5
+
+# Older Codex without hooks: `notify` only fires when a turn ends (card goes to 审核中 with the last reply).
+# Do not use it together with the hooks above.
+# notify = ["akb", "hook", "codex"]

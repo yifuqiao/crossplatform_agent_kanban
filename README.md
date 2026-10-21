@@ -5,11 +5,12 @@
 | 类型 | 平台 | 接入方式 | 能看到什么 |
 | --- | --- | --- | --- |
 | CLI | **Claude Code** | hooks → `akb hook claude-code` | 每个会话一张卡；运行中 / 等你批准 / 一轮结束；**subagent 作为子卡** |
-| CLI | **Codex CLI** | `notify` → `akb hook codex` | 每个 thread 一张卡；每轮结束和最后回复 |
+| CLI | **Codex CLI** | hooks → `akb hook codex` | 每个会话一张卡；运行中 / 等你批准 / 一轮结束 / 子 agent / 开了 PR |
+| 云端 | **Codex cloud**（chatgpt.com/codex） | `AGENTS.md` 约定 + `POST /api/events` | 开工、做完、失败（靠 agent 照约定上报） |
 | IDE/CLI | **Cursor**（编辑器 agent 和 `cursor-agent`） | `.cursor/hooks.json` → `akb hook cursor` | 每个对话一张卡；改文件、跑命令、结束状态 |
 | 云端 | **Cursor cloud agents** | 轮询 Cursor API，或 webhook | 状态、PR 链接；被谁发起就挂在谁下面 |
 | Bot | **Grok Bot**（grok-bot-task-relay） | 轮询 relay `GET /tasks` | 任务时间线，以及它**包在里面的活动**：转交给其他 bot、Cursor cloud agent、审批等待 |
-| 聊天 | claude.ai、ChatGPT、Claude Desktop 等 | MCP 工具 `kanban_report` | 聊天里发起的任务也上同一块板 |
+| 聊天 | claude.ai、ChatGPT（开发者模式 app）、Claude Desktop 等 | MCP 工具 `kanban_report`（OAuth） | 聊天里发起的任务也上同一块板 |
 | 任意 | 任何命令行工具 | `akb run -- <cmd>` 或 HTTP `POST /api/events` | 开始 / 结束 / 退出码 |
 
 无依赖，只需要 Node.js ≥ 20。
@@ -83,19 +84,49 @@ curl -fsSL https://raw.githubusercontent.com/yifuqiao/crossplatform_agent_kanban
 
 ### Codex CLI
 
-在 `~/.codex/config.toml` 加一行（见 [`examples/codex-config.toml`](examples/codex-config.toml)）：
+把 [`examples/codex-config.toml`](examples/codex-config.toml) 里的 hooks 加进 `~/.codex/config.toml`（Windows 是 `%USERPROFILE%\.codex\config.toml`），
+环境变量里设 `AKB_URL=https://<看板地址>` 和 `AKB_SOURCE_KEY`（`akb token-new --source codex` 生成的钥匙）。
+Codex 只运行你信任过的 hook：第一次在 Codex 里打开 `/hooks`，把这些 hook 标为信任；改过 hook 要重新信任。
 
-```toml
-notify = ["akb", "hook", "codex"]
-```
+| Hook | 看板上 |
+| --- | --- |
+| `SessionStart` | 新卡片，标题 `Codex · <目录>`，在排队 |
+| `UserPromptSubmit` | → 进行中；第一句话成为标题 |
+| `PreToolUse` | 保持进行中（不把每条命令写上卡片） |
+| `PermissionRequest` | → 等您，时间线写「等你批准：<要做什么>」 |
+| `PostToolUse` | 批准后回到进行中；`gh pr create` 开出的 PR → 审核中，链接挂到卡上 |
+| `SubagentStart` / `SubagentStop` | 子卡（subagent），结束时写它的最后回复 |
+| `Stop` / `Interrupt` | 留在原列，标“空闲”，最后回复写进摘要 |
+| `SessionEnd` | → 完成 |
 
-Codex 的 `notify` 只在每轮结束时触发，所以只能看到 Review 和最后回复。想看到 Running，用包装器启动：
+hook 的 `session_id` 就是 Codex 的 thread id，和旧的 `notify` 是同一张卡。没有 hooks 的旧版 Codex 只能用 `notify = ["akb", "hook", "codex"]`，它只在每轮结束时触发（卡进审核中，带最后回复）；不要和 hooks 同时开。
+想看到整次运行的开始和退出码，仍然可以用包装器启动：`akb run --title "重构 auth" -- codex`，hook 会写进包装器那张卡（通过 `AKB_TASK_KEY`）。
 
-```bash
-akb run --title "重构 auth" -- codex
-```
+`AKB_CODEX_SOURCE` 可以给卡片换来源名（例如在别的机器上用 `codex-cloud`），钥匙要和来源对应。
 
-包装器的卡片在启动时进入 Running、退出时变 Done/Failed，Codex 的 notify 会写进**同一张卡**（通过 `AKB_TASK_KEY`，见下文）。
+### Codex cloud（chatgpt.com/codex）
+
+云端任务跑在 OpenAI 的容器里，看板没有接口能拉到它们的状态，所以靠 agent 照 `AGENTS.md` 的约定自己上报：
+
+1. 管理员生成一把 `codex-cloud` 来源钥匙（`akb token-new --source codex-cloud`），私下交给你。
+2. Codex 的环境设置里：**环境变量**（不是 Secrets：Secrets 在 agent 开始前就被移除了）加 `AKB_URL=https://<看板地址>` 和 `AKB_SOURCE_KEY=<这把钥匙>`；
+   打开 agent 的联网，允许的域名里加看板的域名。
+3. 把 [`examples/codex-cloud-AGENTS.md`](examples/codex-cloud-AGENTS.md) 的那一节贴进仓库的 `AGENTS.md`。
+
+agent 开工时开卡（进行中），做完改审核中或失败。这是约定而不是 hook：agent 忘了就不会上报。钥匙在环境变量里，agent 能读到，所以只给它一把只能写 `codex-cloud` 卡的来源钥匙，不要放 `AKB_TOKEN`。
+
+### ChatGPT（网页对话，开发者模式 app）
+
+ChatGPT 在网页版的开发者模式里可以加自定义 MCP app，走看板的 OAuth（和 claude.ai 的 connector 是同一套，见 [`deploy/OAUTH.md`](deploy/OAUTH.md)）：
+
+1. 服务器上：`AKB_SOURCE_TOKENS` 里有一条 `chatgpt:<sha256>`（`akb token-new --source chatgpt`）；要用企业微信登录授权，再把 `chatgpt` 加进 `AKB_OAUTH_SOURCES`（例如 `claude-code,chatgpt`）。
+2. ChatGPT 网页 → 设置 → Apps（应用）→ Advanced settings → 打开 Developer mode → Create app。
+   URL 填 `https://<看板地址>/mcp`，认证选 OAuth，其余留空。
+3. 跳到看板的同意页：企业微信登录后选 `chatgpt`，或者贴那把 `chatgpt` 钥匙，点允许。
+4. 对话里从工具菜单打开这个 app，或在 ChatGPT 的自定义指令里写：*“开始我交给你的任务时用 kanban_report 上报，状态变化时更新。”*
+
+看板在授权跳回时带 `iss`（RFC 9207），所以 ChatGPT 用固定的回调 `https://chatgpt.com/connector_platform_oauth_redirect`，它已经在默认允许列表里。
+开发者模式只在网页版；手机 App 里用不了自定义 app。
 
 ### Cursor（编辑器 agent 和 cursor-agent CLI）
 
