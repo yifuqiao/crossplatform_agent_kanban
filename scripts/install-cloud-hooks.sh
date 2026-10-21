@@ -26,14 +26,28 @@ install() {
   [ -f "$tmp/x/src/cli.js" ] || { log "src/cli.js missing in $REPO@$REF; skipping"; return 1; }
 
   mkdir -p "$HOME_DIR"
-  rm -rf "$HOME_DIR/akb" && mkdir -p "$HOME_DIR/akb" \
-    && cp -R "$tmp/x/src" "$tmp/x/package.json" "$HOME_DIR/akb/" || return 1
+  # Build the new copy beside the old one and swap it in, so a hook running right now never sees a half-copied tree.
+  rm -rf "$HOME_DIR/akb.new" && mkdir -p "$HOME_DIR/akb.new" \
+    && cp -R "$tmp/x/src" "$tmp/x/package.json" "$HOME_DIR/akb.new/" || return 1
+  rm -rf "$HOME_DIR/akb.old"
+  if [ -d "$HOME_DIR/akb" ]; then mv "$HOME_DIR/akb" "$HOME_DIR/akb.old" || return 1; fi
+  mv "$HOME_DIR/akb.new" "$HOME_DIR/akb" || return 1
+  rm -rf "$HOME_DIR/akb.old"
+  # Kept so the hook can re-run this same installer later (see below).
+  cp "$tmp/x/scripts/install-cloud-hooks.sh" "$HOME_DIR/install.sh" 2>/dev/null || true
 
   # Skip when the opened repo ships its own board hooks (this repo does), so one session makes one card.
+  # Cloud containers start from a snapshot taken after the setup script ran, so this copy can be days
+  # behind main: at most every 6 hours, re-run the installer in the background (the hook never waits on it).
   cat > "$HOME_DIR/hook.sh" <<EOF
 #!/usr/bin/env bash
 d="\${CLAUDE_PROJECT_DIR:-.}/.claude"
 if grep -qs 'hook claude-code' "\$d/settings.json" "\$d/settings.local.json"; then cat >/dev/null; exit 0; fi
+if [ -f "$HOME_DIR/install.sh" ] && [ -n "\$(find "$HOME_DIR/akb/package.json" -mmin +360 2>/dev/null)" ]; then
+  touch "$HOME_DIR/akb/package.json"
+  AKB_REPO="$REPO" AKB_REF="$REF" AKB_HOME="$HOME_DIR" CLAUDE_SETTINGS="$SETTINGS" \\
+    nohup bash "$HOME_DIR/install.sh" </dev/null >/dev/null 2>&1 &
+fi
 exec node "$HOME_DIR/akb/src/cli.js" hook claude-code
 EOF
   chmod +x "$HOME_DIR/hook.sh"
