@@ -51,6 +51,12 @@ export function recoverTitle(text) {
   return m ? oneLine(m[1], 100) : "";
 }
 
+// Codex desktop prepends the app's own state block to a prompt; it is not the person's words.
+export function stripAmbient(prompt) {
+  if (typeof prompt !== "string") return prompt;
+  return prompt.replace(/^\s*<in-app-browser-context\b[^>]*>[\s\S]*?(?:<\/in-app-browser-context>|$)\s*/i, "");
+}
+
 export function junkTitle(title) {
   if (typeof title !== "string" || !title.trim()) return true;
   return ENVELOPE.test(title.replace(ATTACHMENTS, ""));

@@ -337,3 +337,18 @@ test("a background notification wakes a Claude card without a prompt line or ans
   feed(s, claudeCodeEvents, [{ ...base, hook_event_name: "Stop" }]);
   assert.equal(s.get("claude-code:s5").status, "waiting");
 });
+
+test("Codex sessions with no prompt hang under one summary card until a prompt titles them", () => {
+  const s = new Store();
+  const base = { session_id: "idle1", cwd: "/w" };
+  feed(s, codexEvents, [{ ...base, hook_event_name: "SessionEnd", reason: "other" }]);
+  const card = s.get("codex:idle1");
+  assert.equal(card.parentKey, "codex:_idle");
+  assert.equal(s.get("codex:_idle").title, "Codex 无内容会话");
+  assert.equal(s.list({ root: true }).length, 1);
+  // the first real prompt (after the app's ambient block) gives it a title and takes it out of the group
+  feed(s, codexEvents, [{ ...base, hook_event_name: "UserPromptSubmit", prompt: '<in-app-browser-context source="ambient-ui-state">\nnot the user\n</in-app-browser-context>\n修一下登录' }]);
+  assert.equal(s.get("codex:idle1").title, "修一下登录");
+  assert.equal(s.get("codex:idle1").parentKey, null);
+  assert.equal(s.get("codex:_idle"), null);
+});

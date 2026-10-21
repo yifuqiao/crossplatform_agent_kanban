@@ -1,4 +1,4 @@
-import { folder, oneLine, promptParts } from "./common.js";
+import { folder, oneLine, promptParts, stripAmbient } from "./common.js";
 
 const SOURCE = "codex";
 const PR_URL = /https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+/;
@@ -52,6 +52,10 @@ function codexHookEvents(payload, env) {
     external_id: sessionId,
     cwd: payload.cwd,
     kind: source === SOURCE ? "cli" : "cloud",
+    // A session that never gets a prompt (start/end only) is not a task of its own: the board files it
+    // under one summary card until a prompt gives it a title.
+    group: `${source}:_idle`,
+    group_title: "Codex 无内容会话",
     meta: { transcript_path: payload.transcript_path, permission_mode: payload.permission_mode, model: payload.model },
   };
   const events = [];
@@ -62,7 +66,7 @@ function codexHookEvents(payload, env) {
       events.push({ ...base, initial_status: "queued", title: `Codex · ${folder(payload.cwd)}`, title_mode: "default", message: `Session ${payload.source || "started"}`, type: "session" });
       break;
     case "UserPromptSubmit": {
-      const { text } = promptParts(payload.prompt);
+      const { text } = promptParts(stripAmbient(payload.prompt));
       events.push({ ...base, status: "running", new_turn: true, title: oneLine(text, 100) || undefined, title_mode: "first", message: `Prompt: ${oneLine(text || payload.prompt, 400)}`, type: "prompt" });
       break;
     }
