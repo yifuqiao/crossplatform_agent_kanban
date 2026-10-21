@@ -7,6 +7,10 @@
 # It reads AKB_URL and AKB_SOURCE_KEY (a key made with `akb token-new --source codex`) from the environment.
 #
 # Codex runs a new or changed hook only after you trust it: open `/hooks` in Codex once and trust these.
+#
+# Windows: Codex runs hook commands through PowerShell, where a command that starts with a quoted path
+# ("C:\Program Files\nodejs\node.exe" ...) is just a string and never runs, silently. Start the command with
+# a bare program name on PATH, e.g. `akb hook codex` or `node C:\path\to\agent-kanban\src\cli.js hook codex`.
 
 [[hooks.SessionStart]]
 [[hooks.SessionStart.hooks]]
