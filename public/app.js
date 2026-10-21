@@ -25,8 +25,8 @@ if (params.has("token")) {
 const withToken = (u) => (token ? `${u}${u.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}` : u);
 const inWxWork = /wxwork/i.test(navigator.userAgent || "");
 
-// expanded: "col|group" day groups whose finished-card limit was lifted. toggled: "col|group" groups whose fold differs from the default (今天 open, 昨天/历史 folded).
-const state = { tasks: new Map(), columns: [], hidden: new Set(), query: "", flat: false, showStale: false, open: null, expanded: new Set(), toggled: new Set(), openSteps: new Set() };
+// expanded: "col|group" day groups whose finished-card limit was lifted. folds: "col|group" → open (true/false) the person last clicked; groups not in it use their column default.
+const state = { tasks: new Map(), columns: [], hidden: new Set(), query: "", flat: false, showStale: false, open: null, expanded: new Set(), folds: new Map(), openSteps: new Set() };
 const STALE_MS = 24 * 3600 * 1000;
 // A running/planning card with no event for this long is flagged on the board (still shown).
 const SILENT_MS = 30 * 60 * 1000;
@@ -268,9 +268,16 @@ function cardsForColumn(colId, rootVisible) {
 }
 
 // Cards split by when they were last heard from (the time shown on the card): 今天, 昨天, 历史.
-// 今天 is open by default, 昨天 and 历史 are folded; a click flips one group. Finished columns still show
-// the newest few per open group, with the rest one click away.
+// Which groups start open depends on the column: 进行中 opens all; 排队/规划中/审核中 open all while the column
+// holds at most FEW_CARDS, otherwise only 今天; 完成/失败 open only 今天. A click flips one group. Finished
+// columns still show the newest few per open group, with the rest one click away.
 const DAY_GROUPS = [{ id: "today", label: "今天", open: true }, { id: "yesterday", label: "昨天" }, { id: "older", label: "历史" }];
+const FEW_CARDS = 6;
+function openByDefault(colId, group, total) {
+  if (group.open || colId === "running") return true;
+  if (colId === "queued" || colId === "planning" || colId === "review") return total <= FEW_CARDS;
+  return false;
+}
 function dayGroups(colId, cards) {
   const now = new Date();
   const today = dayKey(now);
@@ -284,11 +291,11 @@ function dayGroups(colId, cards) {
     const list = cards.filter((t) => groupOf(t) === g.id);
     if (!list.length) return null;
     const id = `${colId}|${g.id}`;
-    const open = Boolean(g.open) !== state.toggled.has(id);
+    const open = state.folds.get(id) ?? openByDefault(colId, g, cards.length);
     const shown = finished && !state.expanded.has(id) ? list.slice(0, FINISHED_LIMIT) : list;
     return el("div", { class: `day${open ? " open" : ""}`, "data-keys": list.map((t) => t.key).join(" ") },
       el("button", { class: "day-head", "aria-expanded": String(open), title: open ? "点击折叠" : "点击展开",
-        onclick: () => { state.toggled.has(id) ? state.toggled.delete(id) : state.toggled.add(id); render(); } },
+        onclick: () => { state.folds.set(id, !open); render(); } },
         el("span", { class: "caret" }, open ? "▾" : "▸"), g.label, el("span", { class: "n" }, list.length)),
       open && shown.map((t) => card(t)),
       open && list.length > shown.length && el("button", { class: "more", onclick: () => { state.expanded.add(id); render(); } }, `再显示 ${list.length - shown.length} 张`));
