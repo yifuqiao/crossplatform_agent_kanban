@@ -163,7 +163,7 @@ async function pickChoice(t, value, btn) {
     if (res.choice) {
       const cur = state.tasks.get(t.key) || t;
       state.tasks.set(t.key, { ...cur, choice: res.choice });
-      render();
+      scheduleRender();
     }
   } catch (err) {
     if (btn) btn.disabled = false;
@@ -439,18 +439,10 @@ function connect() {
   es.onerror = () => { $("conn").classList.remove("live"); $("conn").textContent = "已断开，重连中…"; };
   es.addEventListener("task", (e) => {
     const t = JSON.parse(e.data);
-    const prev = state.tasks.get(t.key);
-    // Stream frames carry recent events only; keep the full timeline if the drawer loaded it.
-    if (prev?.events?.length > t.events.length && state.open === t.key) t.events = mergeEvents(prev.events, t.events);
-    state.tasks.set(t.key, t);
-    noteChange([t.key]);
-    scheduleRender();
+    enqueue(t.key, t);
   });
   es.addEventListener("remove", (e) => {
-    const keys = JSON.parse(e.data);
-    for (const k of keys) state.tasks.delete(k);
-    noteChange(keys);
-    scheduleRender();
+    for (const k of JSON.parse(e.data)) enqueue(k, null);
   });
 }
 
@@ -459,42 +451,81 @@ function mergeEvents(a, b) {
   return [...a, ...b.filter((e) => !seen.has(e.id))];
 }
 
-// Every render moves cards smoothly (FLIP: measure, redraw, play each card from where it was).
-// While the window is in the background the board stays as the person left it; updates are
-// buffered and played back when they return, so they can see what happened while they were away.
+// Stream updates are queued and applied one card at a time: each card glides to its new place
+// (FLIP: measure, redraw, play from where it was) and lands before the next one moves.
+// While the window is in the background nothing is applied, so the board stays as the person left
+// it; when they come back the queue plays out card by card, so they can see what happened.
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
 const away = () => document.hidden || !document.hasFocus();
 const EASE = "cubic-bezier(.22, 1, .36, 1)";
 // What the person last saw, per card: status and update time.
 const version = (t) => `${t.status}|${t.updatedAt}`;
 let seen = new Map();
-const buffered = new Set();
-let pending = false;
+// key -> latest stream frame, or null when removed; a key keeps its place in line when it updates again.
+const queue = new Map();
 let playing = false;
+let pending = false;
 
-function noteChange(keys) {
-  if (!away()) return;
-  for (const k of keys) buffered.add(k);
+function enqueue(key, t) {
+  queue.set(key, t);
+  showQueue();
+  if (!away()) play();
+}
+
+function showQueue() {
   const n = $("paused");
-  n.hidden = buffered.size === 0;
-  n.textContent = `${buffered.size} 张卡有变化，回到窗口时播放`;
+  n.hidden = queue.size === 0;
+  n.textContent = playing ? `回放中 · 还有 ${queue.size} 张` : `${queue.size} 张卡有变化，回到窗口时播放`;
 }
 
+function apply(key, t) {
+  if (!t) return void state.tasks.delete(key);
+  const prev = state.tasks.get(key);
+  // Stream frames carry recent events only; keep the full timeline if the drawer loaded it.
+  if (prev?.events?.length > t.events.length && state.open === key) t.events = mergeEvents(prev.events, t.events);
+  state.tasks.set(key, t);
+}
+
+const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function play() {
+  if (playing) return;
+  playing = true;
+  try {
+    while (queue.size && !away()) {
+      const [key, t] = queue.entries().next().value;
+      queue.delete(key);
+      apply(key, t);
+      showQueue();
+      // A long backlog plays faster, so coming back after a night does not mean a minute of waiting.
+      const ms = Math.round(Math.max(320, Math.min(720, 7000 / (queue.size + 1))));
+      const { moved, flashed } = render({ duration: ms, focus: key });
+      if (moved) await moved;
+      else if (flashed) await pause(Math.min(ms, 400));
+    }
+  } finally {
+    playing = false;
+    showQueue();
+  }
+}
+
+// Redraws that are not stream updates (the 30 s clock, a choice being recorded) wait while the window is away.
 function scheduleRender() {
-  if (pending) return;
-  pending = true;
-  if (away() || playing) return;
-  requestAnimationFrame(() => { pending = false; render(); });
+  if (away()) return void (pending = true);
+  if (!playing) render();
 }
 
-// Back in front of the person: play what was buffered, after a beat so their eyes have arrived.
+// Back in front of the person: play what was queued, after a beat so their eyes have arrived.
 function resume() {
-  if (!pending || playing || away()) return;
+  if (away()) return;
   setTimeout(() => {
-    if (!pending || playing || away()) return;
-    pending = false;
-    render();
-  }, buffered.size ? 250 : 0);
+    if (away()) return;
+    if (pending && !playing) {
+      pending = false;
+      render();
+    }
+    play();
+  }, queue.size ? 250 : 0);
 }
 window.addEventListener("focus", resume);
 document.addEventListener("visibilitychange", resume);
@@ -528,42 +559,43 @@ function landingSpot(key) {
   return day ? day.querySelector(".day-head") : spot.querySelector("h2");
 }
 
-function render() {
-  // A direct render that lands while the window is away (e.g. a choice POST resolving) waits for focus too.
-  if (seen.size && away()) {
-    pending = true;
-    return;
-  }
+// Redraw and animate every card from its old place. Returns `moved` (a promise for the end of the
+// motion, or null when nothing moved) and whether any card was ringed as changed.
+function render({ duration = 720, focus = null } = {}) {
   const before = cardRects();
   const was = seen;
   const first = was.size === 0;
   draw();
-  buffered.clear();
-  $("paused").hidden = true;
-  if (first) return;
+  if (first) return { moved: null, flashed: false };
   const after = cardRects();
   const still = reducedMotion.matches;
   const layer = el("div", { class: "flip-layer", "aria-hidden": "true" });
   const runs = [];
+  let flashed = false;
   let i = 0;
   const order = [...after].sort(([, a], [, b]) => a.rect.top - b.rect.top || a.rect.left - b.rect.left);
   for (const [key, cur] of order) {
     const old = before.get(key);
-    if (!old || was.get(key) !== seen.get(key)) cur.node.classList.add("flash");
+    const changed = !old || was.get(key) !== seen.get(key);
+    if (changed) {
+      cur.node.classList.add("flash");
+      flashed = true;
+    }
     if (still) continue;
     if (!old) {
       runs.push(cur.node.animate([{ opacity: 0, transform: "translateY(10px) scale(.97)" }, { opacity: 1, transform: "none" }],
-        { duration: 520, delay: 260, easing: EASE, fill: "backwards" }));
+        { duration, delay: duration * 0.25, easing: EASE, fill: "backwards" }));
       continue;
     }
     const dx = old.rect.left - cur.rect.left;
     const dy = old.rect.top - cur.rect.top;
     if (Math.abs(dx) < 1 && Math.abs(dy) < 1) continue;
     const frames = [{ transform: `translate(${dx}px, ${dy}px)` }, { transform: "none" }];
-    const opts = { duration: 720, delay: Math.min(i++ * 35, 280), easing: EASE, fill: "backwards" };
+    // The card being played leads; the ones making room follow a touch behind.
+    const opts = { duration, delay: key === focus ? 0 : Math.min(++i * 20, 120), easing: EASE, fill: "backwards" };
     if (old.lane === cur.lane) {
       // Lift a moving card over the ones it passes; a card that changed rides above the ones making room.
-      cur.node.style.zIndex = was.get(key) !== seen.get(key) ? "2" : "1";
+      cur.node.style.zIndex = changed ? "2" : "1";
       const a = cur.node.animate(frames, opts);
       a.finished.finally(() => { cur.node.style.zIndex = ""; });
       runs.push(a);
@@ -583,19 +615,14 @@ function render() {
       const to = spot
         ? `translate(${spot.left + spot.width / 2 - (old.rect.left + old.rect.width / 2)}px, ${spot.top + spot.height / 2 - (old.rect.top + old.rect.height / 2)}px) scale(.3)`
         : "scale(.94)";
-      const a = g.animate([{ opacity: 1, transform: "none" }, { opacity: 0, transform: to }], { duration: 640, easing: "cubic-bezier(.4, 0, .2, 1)", fill: "forwards" });
+      const a = g.animate([{ opacity: 1, transform: "none" }, { opacity: 0, transform: to }], { duration, easing: "cubic-bezier(.4, 0, .2, 1)", fill: "forwards" });
       a.finished.finally(() => g.remove());
       runs.push(a);
     }
   }
-  if (!runs.length) return;
+  if (!runs.length) return { moved: null, flashed };
   document.body.append(layer);
-  playing = true;
-  Promise.allSettled(runs.map((a) => a.finished)).then(() => {
-    layer.remove();
-    playing = false;
-    if (pending) { pending = false; scheduleRender(); }
-  });
+  return { moved: Promise.allSettled(runs.map((a) => a.finished)).then(() => layer.remove()), flashed };
 }
 
 $("search").addEventListener("input", (e) => { state.query = e.target.value.trim().toLowerCase(); render(); });
