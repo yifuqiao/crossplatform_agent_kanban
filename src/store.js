@@ -398,6 +398,23 @@ export class Store extends EventEmitter {
     return { task, changed: true };
   }
 
+  // Board click only: the user says a card the agent never closed is done or dropped. Only the card
+  // changes; nothing is sent to the agent or the relay. A newer report from the agent still wins.
+  closeByBoard(key, { status, by } = {}) {
+    const task = this.tasks.get(key);
+    if (!task) return { error: "not found", status: 404 };
+    if (task.placeholder) return { error: "this card only groups other tasks; close one of them", status: 409 };
+    if (!TERMINAL.has(status)) return { error: "status must be done or failed", status: 400 };
+    if (TERMINAL.has(task.status)) return { error: `task is ${task.status}`, status: 409 };
+    const who = cleanString(by, 80) || null;
+    this.apply({
+      key, status, type: "board_close",
+      message: `${status === "done" ? "在看板上确认已完成" : "在看板上标记为已放弃"}${who ? ` · ${who}` : ""}`,
+      meta: { closed_on_board: status },
+    });
+    return { task };
+  }
+
   updateRequests({ source } = {}) {
     return this.list({ source }).filter((t) => t.updateRequest).sort((a, b) => a.updateRequest.at.localeCompare(b.updateRequest.at));
   }

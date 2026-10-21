@@ -655,3 +655,27 @@ test("Get update sends no network request: not to the agent, the relay or anywhe
     assert.ok(store.get("grok-bot:r1").updateRequest);
   });
 });
+
+test("我确认已完成 / 已放弃 closes a card on the board only; a newer agent report still wins", async () => {
+  await withServer({ token: "test-token" }, async (base, store) => {
+    const close = (key, status, headers = bearer("test-token")) => fetch(`${base}/api/tasks/${encodeURIComponent(key)}/close`, json({ status }, headers));
+    store.apply({ key: "grok-bot:r1", title: "Deploy", status: "executing", at: "2026-10-20T09:00:00.000Z" });
+
+    assert.equal((await close("grok-bot:r1", "done", {})).status, 401);
+    assert.equal((await close("grok-bot:nope", "done")).status, 404);
+    assert.equal((await close("grok-bot:r1", "running")).status, 400);
+    const res = await close("grok-bot:r1", "done");
+    assert.equal(res.status, 200);
+    const task = store.get("grok-bot:r1");
+    assert.equal(task.status, "done");
+    assert.equal(task.meta.closed_on_board, "done");
+    assert.ok(task.events.some((e) => e.type === "board_close"));
+    assert.equal((await close("grok-bot:r1", "failed")).status, 409);
+
+    // A replay of the old relay snapshot does not reopen it; a genuinely newer report does.
+    store.apply({ key: "grok-bot:r1", status: "executing", at: "2026-10-20T09:00:00.000Z" });
+    assert.equal(store.get("grok-bot:r1").status, "done");
+    store.apply({ key: "grok-bot:r1", status: "executing", at: new Date(Date.now() + 60000).toISOString() });
+    assert.equal(store.get("grok-bot:r1").status, "running");
+  });
+});

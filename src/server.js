@@ -594,6 +594,17 @@ export function createServer({
         return send(res, 200, { ok: true, choice: store.get(key).choice, changed: result.changed });
       }
 
+      // 我确认已完成 / 已放弃 on a card the agent left open. Board-only; the relay is never written.
+      const close = url.pathname.match(/^\/api\/tasks\/([^/]+)\/close$/);
+      if (close) {
+        if (req.method !== "POST") return send(res, 405, { error: "method not allowed" }, { allow: "POST" });
+        const body = parseJson(await readBody(req));
+        const by = sessionOk(req)?.uid || (tokenOk(req, url, token) ? "admin-token" : null);
+        const result = store.closeByBoard(decodeURIComponent(close[1]), { status: body?.status, by });
+        if (result.error) return send(res, result.status, { error: result.error });
+        return send(res, 200, { ok: true, status: result.task.status });
+      }
+
       const one = url.pathname.match(/^\/api\/tasks\/(.+)$/);
       if (one) {
         const key = decodeURIComponent(one[1]);

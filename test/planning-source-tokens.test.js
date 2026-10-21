@@ -326,7 +326,7 @@ test("a misconfigured AKB_SOURCE_TOKENS stops the server from starting", () => {
 
 // --- agent names ---
 
-test("cards without agent_name keep showing the source only; relay hand-offs carry the bot name", () => {
+test("cards without agent_name keep showing the source only; a relay hand-off names the task's bot", () => {
   const s = new Store();
   s.apply({ key: "grok-bot:plain", title: "Old card", status: "running" });
   assert.equal(s.get("grok-bot:plain").agentName, undefined);
@@ -337,9 +337,8 @@ test("cards without agent_name keep showing the source only; relay hand-offs car
     ],
   };
   for (const ev of grokTaskEvents(detail, { listed: { relayTaskId: id, title: "t" } })) s.apply(ev);
-  const [handoff] = s.children(`grok-bot:${id}`);
-  assert.equal(handoff.agentName, "示例机器人");
-  assert.equal(s.get(`grok-bot:${id}`).agentName, undefined);
+  assert.equal(s.children(`grok-bot:${id}`).length, 0, "a hand-off is not a card of its own");
+  assert.equal(s.get(`grok-bot:${id}`).agentName, "示例机器人");
 });
 
 test("a per-source key only sees Get update requests on cards it can answer", async () => {
