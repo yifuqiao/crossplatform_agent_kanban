@@ -42,6 +42,12 @@ export function claudeCodeEvents(payload, env = process.env) {
     case "UserPromptSubmit": {
       // The person's own words name the card; a coordinator's note only until those arrive.
       const { text, human } = promptParts(payload.prompt);
+      // A background notification (a finished task, a PR event) wakes the agent but is nobody's words:
+      // the card is busy again, but the person's open 等您 item is not answered by it.
+      if (!text && !human) {
+        events.push({ ...base, status: "running" });
+        break;
+      }
       // A new turn: whatever the last one handed over has been seen (new_turn clears the 等您 mark).
       events.push({ ...base, status: "running", new_turn: true, title: oneLine(text, 100) || undefined, title_mode: human ? "first" : "default", ...promptLine(text || payload.prompt, human) });
       break;

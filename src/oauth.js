@@ -5,7 +5,7 @@ import { hashToken, matchSourceToken } from "./source-tokens.js";
 import { clearCookieHeader, cookieHeader, parseCookies, signPayload, verifyPayload } from "./session.js";
 import { isWecomWired, loadWecomConfig } from "./wecom.js";
 
-// OAuth 2.1 for MCP clients that cannot send a static Bearer (claude.ai, Claude iOS).
+// OAuth 2.1 for MCP clients that cannot send a static Bearer (claude.ai, Claude iOS, ChatGPT).
 // Everything lives under /kanban so the relay's own OAuth page at the domain root is not involved.
 // Tokens are opaque; only sha256 hashes are stored. oauth.json sits next to state.json and is the
 // only file this module writes. Pending consent requests stay in memory. If the signing key or
@@ -16,6 +16,9 @@ export const OAUTH_CSRF_COOKIE = "akb_oauth_csrf";
 export const DEFAULT_REDIRECTS = Object.freeze([
   "https://claude.ai/api/mcp/auth_callback",
   "https://claude.com/api/mcp/auth_callback",
+  // ChatGPT (developer-mode apps) and Codex use this one only when the authorization response
+  // carries `iss` (RFC 9207, see serverMetadata); otherwise they fall back to a per-app callback URL.
+  "https://chatgpt.com/connector_platform_oauth_redirect",
 ]);
 
 const CODE_TTL_MS = 60 * 1000;
@@ -371,6 +374,8 @@ export function createOauth({
       response_types_supported: ["code"],
       grant_types_supported: ["authorization_code", "refresh_token"],
       code_challenge_methods_supported: ["S256"],
+      // Every redirect back to the client (code or error) carries iss=<issuer>.
+      authorization_response_iss_parameter_supported: true,
       token_endpoint_auth_methods_supported: ["none"],
       revocation_endpoint_auth_methods_supported: ["none"],
       scopes_supported: ["offline_access"],
@@ -400,6 +405,7 @@ export function createOauth({
     const u = new URL(redirectUri);
     u.searchParams.set("error", error);
     if (oauthState) u.searchParams.set("state", oauthState);
+    u.searchParams.set("iss", issuer);
     redirectTo(res, u.toString());
   }
 
@@ -470,7 +476,7 @@ export function createOauth({
   .muted{color:#475569;font-size:.9rem}
 </style></head><body>
 <h1>允许连接看板</h1>
-<p class="warn">「只在你自己刚在 Claude 里点了连接时才允许」</p>
+<p class="warn">「只在你自己刚在 Claude 或 ChatGPT 里点了连接时才允许」</p>
 ${note}
 <p><strong>${escapeHtml(who)}</strong> 要连接 Agent Kanban，并以某个来源的身份上报任务。这不会授予管理员权限。</p>
 <p>客户端 <code>${escapeHtml(clientPrefix)}…</code>，注册于 <code>${escapeHtml(registered)}</code></p>
@@ -496,7 +502,7 @@ ${sessionBlock}
   function showConsent(res, sendHtml, ctx, id, reqPending) {
     const client = state.clients[reqPending.clientId];
     if (!client) {
-      page(res, sendHtml, 400, "<!doctype html><title>Expired</title><p>This sign-in expired. Go back to Claude and try again.</p>");
+      page(res, sendHtml, 400, "<!doctype html><title>Expired</title><p>This sign-in expired. Go back to Claude or ChatGPT and try again.</p>");
       return;
     }
     const session = ctx.session() || null;
@@ -727,7 +733,7 @@ ${sessionBlock}
           if (resume && !url.searchParams.get("client_id")) {
             const reqPending = pending.get(resume);
             if (!reqPending || reqPending.exp <= clock()) {
-              page(res, sendHtml, 400, "<!doctype html><title>Expired</title><p>This sign-in expired. Go back to Claude and try again.</p>");
+              page(res, sendHtml, 400, "<!doctype html><title>Expired</title><p>This sign-in expired. Go back to Claude or ChatGPT and try again.</p>");
               return true;
             }
             showConsent(res, sendHtml, ctx, resume, reqPending);
@@ -791,11 +797,11 @@ ${sessionBlock}
         const payload = verifyPayload(state.signingKey, cookies[OAUTH_CSRF_COOKIE]);
         const reqPending = pending.get(resume);
         if (!payload || payload.id !== csrf || csrf !== resume || !reqPending) {
-          page(res, sendHtml, 403, "<!doctype html><title>Bad session</title><p>Consent session expired. Go back to Claude and try again.</p>");
+          page(res, sendHtml, 403, "<!doctype html><title>Bad session</title><p>Consent session expired. Go back to Claude or ChatGPT and try again.</p>");
           return true;
         }
         if (reqPending.exp <= clock() || !state.clients[reqPending.clientId]) {
-          page(res, sendHtml, 400, "<!doctype html><title>Expired</title><p>This sign-in expired. Go back to Claude and try again.</p>");
+          page(res, sendHtml, 400, "<!doctype html><title>Expired</title><p>This sign-in expired. Go back to Claude or ChatGPT and try again.</p>");
           return true;
         }
         if (params.get("deny") === "1") {
@@ -857,6 +863,7 @@ ${sessionBlock}
         const dest = new URL(reqPending.redirectUri);
         dest.searchParams.set("code", code);
         if (reqPending.state) dest.searchParams.set("state", reqPending.state);
+        dest.searchParams.set("iss", issuer);
         redirectTo(res, dest.toString(), {
           "set-cookie": clearCookieHeader(OAUTH_CSRF_COOKIE, { basePath: ctx.base || "/" }),
         });

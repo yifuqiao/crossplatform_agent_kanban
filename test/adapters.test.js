@@ -269,3 +269,71 @@ test("a reply that only links a PR leaves the card to the PR rule", () => {
   ]);
   assert.equal(s.get("claude-code:o2").status, "review");
 });
+
+test("Codex lifecycle hooks: prompt, approval wait, subagent, PR, idle turn, session end", () => {
+  const s = new Store();
+  const base = { session_id: "th7", cwd: "/work/api", transcript_path: "/t.jsonl", model: "gpt-x" };
+  feed(s, codexEvents, [
+    { ...base, hook_event_name: "SessionStart", source: "startup" },
+    { ...base, hook_event_name: "UserPromptSubmit", turn_id: "t1", prompt: "Fix the login bug" },
+    { ...base, hook_event_name: "PreToolUse", turn_id: "t1", tool_name: "Bash", tool_input: { command: "npm test" } },
+  ]);
+  const card = () => s.get("codex:th7");
+  assert.equal(card().title, "Fix the login bug");
+  assert.equal(card().status, "running");
+  assert.equal(card().kind, "cli");
+
+  feed(s, codexEvents, [{ ...base, hook_event_name: "PermissionRequest", turn_id: "t1", tool_name: "Bash", tool_input: { command: "rm -rf build", description: "删除构建目录" } }]);
+  assert.equal(card().status, "waiting");
+  assert.ok(card().events.some((e) => /等你批准：删除构建目录/.test(e.message || "")));
+
+  feed(s, codexEvents, [
+    { ...base, hook_event_name: "PostToolUse", turn_id: "t1", tool_name: "Bash", tool_input: { command: "rm -rf build" }, tool_response: "" },
+    { ...base, hook_event_name: "SubagentStart", turn_id: "t1", agent_id: "a1", agent_type: "explorer" },
+  ]);
+  assert.equal(card().status, "running");
+  const [sub] = s.children("codex:th7");
+  assert.equal(sub.title, "Subagent: explorer");
+  assert.equal(sub.status, "running");
+  feed(s, codexEvents, [{ ...base, hook_event_name: "SubagentStop", turn_id: "t1", agent_id: "a1", last_assistant_message: "found it" }]);
+  assert.equal(s.get(sub.key).status, "done");
+  assert.equal(s.get(sub.key).summary, "found it");
+
+  feed(s, codexEvents, [{ ...base, hook_event_name: "PostToolUse", turn_id: "t1", tool_name: "Bash", tool_input: { command: ["bash", "-lc", "gh pr create --fill"] }, tool_response: "https://github.com/o/r/pull/12\n" }]);
+  assert.equal(card().status, "review");
+  assert.ok(card().links.some((l) => l.url === "https://github.com/o/r/pull/12"));
+
+  feed(s, codexEvents, [{ ...base, hook_event_name: "Stop", turn_id: "t1", stop_hook_active: false, last_assistant_message: "Fixed and opened a PR" }]);
+  assert.equal(card().summary, "Fixed and opened a PR");
+  assert.ok(card().idleSince);
+
+  feed(s, codexEvents, [{ ...base, hook_event_name: "SessionEnd", reason: "other" }]);
+  assert.equal(card().status, "done");
+});
+
+test("AKB_CODEX_SOURCE puts Codex cloud sessions under their own source", () => {
+  const s = new Store();
+  feed(s, codexEvents, [{ session_id: "c1", cwd: "/workspace/repo", hook_event_name: "UserPromptSubmit", prompt: "Add tests" }], { AKB_CODEX_SOURCE: "codex-cloud" });
+  assert.equal(s.get("codex:c1"), null);
+  assert.equal(s.get("codex-cloud:c1").kind, "cloud");
+  // A malformed override falls back to the default source.
+  feed(s, codexEvents, [{ session_id: "c2", hook_event_name: "UserPromptSubmit", prompt: "x" }], { AKB_CODEX_SOURCE: "Bad Source!" });
+  assert.ok(s.get("codex:c2"));
+});
+
+test("a background notification wakes a Claude card without a prompt line or answering 等您", () => {
+  const s = new Store();
+  const base = { session_id: "s5", cwd: "/w" };
+  feed(s, claudeCodeEvents, [
+    { ...base, hook_event_name: "UserPromptSubmit", prompt: "写个文档" },
+    { ...base, hook_event_name: "PostToolUse", tool_name: "mcp__hearthbot__post_message", tool_input: { text: "好了", attached_outputs: [{ kind: "link", ref: "https://example.com/doc", title: "文档" }] } },
+    { ...base, hook_event_name: "Stop" },
+  ]);
+  assert.equal(s.get("claude-code:s5").status, "waiting");
+  feed(s, claudeCodeEvents, [{ ...base, hook_event_name: "UserPromptSubmit", prompt: "<task-notification>\n<task-type>queued-remote-notifications</task-type>\n</task-notification>" }]);
+  const card = s.get("claude-code:s5");
+  assert.equal(card.title, "写个文档");
+  assert.ok(!card.events.some((e) => /task-notification/.test(e.message || "")));
+  feed(s, claudeCodeEvents, [{ ...base, hook_event_name: "Stop" }]);
+  assert.equal(s.get("claude-code:s5").status, "waiting");
+});

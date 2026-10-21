@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { Store } from "../src/store.js";
 import { normalizeStatus } from "../src/status.js";
+import { createSessionSweeper } from "../src/pollers/session-sweep.js";
 
 test("creates, updates and dedupes by event_id", () => {
   const s = new Store();
@@ -188,4 +189,41 @@ test("loading old state puts turn-ended hook cards back in 进行中 and frees X
   assert.equal(s.get("cursor:c").status, "review");
   s.apply({ key: "claude-code-web:a", title: "真正的标题", title_mode: "first" });
   assert.equal(s.get("claude-code-web:a").title, "真正的标题");
+});
+
+test("session sweep closes hook session cards quiet for hours, and the next prompt reopens them", async () => {
+  const s = new Store();
+  const old = "2026-10-20T00:00:00.000Z";
+  s.apply({ key: "claude-code-web:idle", title: "idle", status: "running", idle: true, at: old });
+  s.apply({ key: "claude-code-web:silent", title: "silent", status: "running", at: old });
+  s.apply({ key: "claude-code-web:fresh", title: "fresh", status: "running" });
+  s.apply({ key: "claude-code-web:asks", title: "asks", status: "waiting", at: old });
+  s.apply({ key: "grok-bot:r1", title: "relay", status: "running", at: old });
+  s.apply({ key: "claude-code-web:mcp", title: "mcp", status: "running", created_by: "mcp:claude-code-web", at: old });
+  s.apply({ key: "claude-code-web:busy", title: "busy parent", status: "running", at: old });
+  s.apply({ key: "claude-code-web:busy/sub", parent: "claude-code-web:busy", status: "running" });
+  await createSessionSweeper({ store: s }).poll();
+  assert.equal(s.get("claude-code-web:idle").status, "done");
+  assert.equal(s.get("claude-code-web:silent").status, "done");
+  assert.match(s.get("claude-code-web:silent").events.at(-1).message, /6 小时没有动静/);
+  for (const k of ["claude-code-web:fresh", "claude-code-web:asks", "grok-bot:r1", "claude-code-web:mcp", "claude-code-web:busy"]) {
+    assert.notEqual(s.get(k).status, "done", k);
+  }
+  s.apply({ key: "claude-code-web:idle", status: "running", new_turn: true, message: "Prompt: 继续", type: "prompt" });
+  assert.equal(s.get("claude-code-web:idle").status, "running");
+});
+
+test("loading old state turns raw notification prompts into relay lines", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "akb-migrate-"));
+  const at = "2026-10-20T10:00:00.000Z";
+  fs.writeFileSync(path.join(dir, "state.json"), JSON.stringify({ version: 1, tasks: [{
+    key: "claude-code-web:n", source: "claude-code-web", externalId: "n", title: "t", titled: true, status: "running", links: [], meta: {},
+    createdAt: at, updatedAt: at, seen: [], events: [
+      { id: "n1", at, status: "running", message: "Prompt: <task-notification> <task-type>queued-remote-notifica", type: "prompt" },
+      { id: "n2", at, status: "running", message: 'Prompt: <wake reason="mention"><message trigger="true" from="human">改一下标题', type: "prompt" },
+      { id: "n3", at, status: "running", message: "Prompt: 普通的一句话", type: "prompt" },
+    ],
+  }] }));
+  const ev = new Store({ dataDir: dir }).get("claude-code-web:n").events;
+  assert.deepEqual(ev.map((e) => [e.type, e.message]), [["relay", "转来: 系统消息"], ["prompt", "Prompt: 改一下标题"], ["prompt", "Prompt: 普通的一句话"]]);
 });

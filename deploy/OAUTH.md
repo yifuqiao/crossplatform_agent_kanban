@@ -55,6 +55,7 @@ Claude iPhone 应用可以**使用**已经连上的自定义 connector；添加�
 - 重定向默认只允许：
   - `https://claude.ai/api/mcp/auth_callback`
   - `https://claude.com/api/mcp/auth_callback`
+  - `https://chatgpt.com/connector_platform_oauth_redirect`（ChatGPT 开发者模式 app 和 Codex；看板在每个授权跳回里带 `iss`，ChatGPT 才会用这个固定地址）
   要多放一个，设 `AKB_OAUTH_REDIRECT_ALLOW` 为逗号分隔的 **完整 https URL**（精确匹配，追加到上面两个，不替换）。`http://` 和带 `#` 的会被忽略。
 
 PKCE 只用 S256。授权码 60 秒、一次性。访问令牌只存哈希。
