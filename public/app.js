@@ -216,7 +216,7 @@ function card(t, { showParent = false, hideTree = false } = {}) {
   ].filter(Boolean);
   // In the needs-you lane every waiting card is listed once; hide the nested tree so a waiting child is not shown twice.
   const showTree = !hideTree && !state.flat;
-  return el("article", { class: `card${attention ? " attention-child" : ""}${stale ? " stale" : ""}`, style: `--c:var(--${t.status})`, onclick: () => openTask(t.key) },
+  return el("article", { class: `card${attention ? " attention-child" : ""}${stale ? " stale" : ""}`, "data-key": t.key, style: `--c:var(--${t.status})`, onclick: () => openTask(t.key) },
     el("div", { class: "top" }, badge(t.source, t.agentName),
       el("span", { class: "time", title: `最后上报 ${new Date(heard).toLocaleString()}` }, since(heard))),
     parent && el("div", { class: "parent-line" }, `↳ ${displayTitle(parent)}`),
@@ -255,7 +255,7 @@ function cardsForColumn(colId, rootVisible) {
   return out;
 }
 
-function render() {
+function draw() {
   renderSources();
   const candidates = [...state.tasks.values()].filter((t) => (state.flat || isRoot(t)) && matches(t));
   const staleCount = candidates.filter(staleReason).length;
@@ -276,7 +276,7 @@ function render() {
     const label = STATUS_LABEL[col.id] || col.label;
     const finished = col.id === "done" || col.id === "failed";
     const shown = finished && !state.expanded.has(col.id) ? cards.slice(0, FINISHED_LIMIT) : cards;
-    return el("section", { class: `column${cards.length ? "" : " empty"}`, style: `--c:var(--${col.id})`, title: cards.length ? null : `${label}：暂无` },
+    return el("section", { class: `column${cards.length ? "" : " empty"}`, "data-col": col.id, style: `--c:var(--${col.id})`, title: cards.length ? null : `${label}：暂无` },
       el("h2", {}, el("span", { class: "dot" }), label, el("span", { class: "n" }, cards.length)),
       shown.map((t) => card(t)),
       cards.length > shown.length && el("button", { class: "more", onclick: () => { state.expanded.add(col.id); render(); } }, `再显示 ${cards.length - shown.length} 张`));
@@ -290,6 +290,7 @@ function render() {
     stat(byStatus.failed || 0, "失败"),
   ].filter(Boolean));
   if (state.open) renderDetail();
+  seen = new Map([...state.tasks.values()].map((t) => [t.key, version(t)]));
 }
 
 async function api(path, opts) {
@@ -410,10 +411,13 @@ function connect() {
     // Stream frames carry recent events only; keep the full timeline if the drawer loaded it.
     if (prev?.events?.length > t.events.length && state.open === t.key) t.events = mergeEvents(prev.events, t.events);
     state.tasks.set(t.key, t);
+    noteChange([t.key]);
     scheduleRender();
   });
   es.addEventListener("remove", (e) => {
-    for (const k of JSON.parse(e.data)) state.tasks.delete(k);
+    const keys = JSON.parse(e.data);
+    for (const k of keys) state.tasks.delete(k);
+    noteChange(keys);
     scheduleRender();
   });
 }
@@ -423,11 +427,135 @@ function mergeEvents(a, b) {
   return [...a, ...b.filter((e) => !seen.has(e.id))];
 }
 
+// Every render moves cards smoothly (FLIP: measure, redraw, play each card from where it was).
+// While the window is in the background the board stays as the person left it; updates are
+// buffered and played back when they return, so they can see what happened while they were away.
+const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+const away = () => document.hidden || !document.hasFocus();
+const EASE = "cubic-bezier(.22, 1, .36, 1)";
+// What the person last saw, per card: status and update time.
+const version = (t) => `${t.status}|${t.updatedAt}`;
+let seen = new Map();
+const buffered = new Set();
 let pending = false;
+let playing = false;
+
+function noteChange(keys) {
+  if (!away()) return;
+  for (const k of keys) buffered.add(k);
+  const n = $("paused");
+  n.hidden = buffered.size === 0;
+  n.textContent = `${buffered.size} 张卡有变化，回到窗口时播放`;
+}
+
 function scheduleRender() {
   if (pending) return;
   pending = true;
+  if (away() || playing) return;
   requestAnimationFrame(() => { pending = false; render(); });
+}
+
+// Back in front of the person: play what was buffered, after a beat so their eyes have arrived.
+function resume() {
+  if (!pending || playing || away()) return;
+  setTimeout(() => {
+    if (!pending || playing || away()) return;
+    pending = false;
+    render();
+  }, buffered.size ? 250 : 0);
+}
+window.addEventListener("focus", resume);
+document.addEventListener("visibilitychange", resume);
+
+function cardRects() {
+  const m = new Map();
+  for (const n of document.querySelectorAll(".card[data-key]")) {
+    if (!m.has(n.dataset.key)) m.set(n.dataset.key, { node: n, rect: n.getBoundingClientRect(), lane: n.closest("#attention") ? "attention" : "board" });
+  }
+  return m;
+}
+
+// A fixed-position copy of a card, for moves the real card cannot make inside its own container
+// (between the needs-you lane and the board, or off the board into a folded spot).
+function ghost(layer, node, rect) {
+  const g = node.cloneNode(true);
+  g.removeAttribute("data-key");
+  Object.assign(g.style, { position: "absolute", left: `${rect.left}px`, top: `${rect.top}px`, width: `${rect.width}px`, height: `${rect.height}px`, margin: "0" });
+  layer.append(g);
+  return g;
+}
+
+// Where a card that is no longer drawn went: the header of its new column (or the needs-you lane).
+function landingSpot(key) {
+  const t = state.tasks.get(key);
+  if (!t) return null;
+  const spot = t.status === "waiting" ? $("attention") : document.querySelector(`.column[data-col="${t.status}"]`);
+  return spot && !spot.hidden ? spot.querySelector("h2") : null;
+}
+
+function render() {
+  const before = cardRects();
+  const was = seen;
+  const first = was.size === 0;
+  draw();
+  buffered.clear();
+  $("paused").hidden = true;
+  if (first) return;
+  const after = cardRects();
+  const still = reducedMotion.matches;
+  const layer = el("div", { class: "flip-layer", "aria-hidden": "true" });
+  const runs = [];
+  let i = 0;
+  const order = [...after].sort(([, a], [, b]) => a.rect.top - b.rect.top || a.rect.left - b.rect.left);
+  for (const [key, cur] of order) {
+    const old = before.get(key);
+    if (!old || was.get(key) !== seen.get(key)) cur.node.classList.add("flash");
+    if (still) continue;
+    if (!old) {
+      runs.push(cur.node.animate([{ opacity: 0, transform: "translateY(10px) scale(.97)" }, { opacity: 1, transform: "none" }],
+        { duration: 520, delay: 260, easing: EASE, fill: "backwards" }));
+      continue;
+    }
+    const dx = old.rect.left - cur.rect.left;
+    const dy = old.rect.top - cur.rect.top;
+    if (Math.abs(dx) < 1 && Math.abs(dy) < 1) continue;
+    const frames = [{ transform: `translate(${dx}px, ${dy}px)` }, { transform: "none" }];
+    const opts = { duration: 720, delay: Math.min(i++ * 35, 280), easing: EASE, fill: "backwards" };
+    if (old.lane === cur.lane) {
+      // Lift a moving card over the ones it passes; a card that changed rides above the ones making room.
+      cur.node.style.zIndex = was.get(key) !== seen.get(key) ? "2" : "1";
+      const a = cur.node.animate(frames, opts);
+      a.finished.finally(() => { cur.node.style.zIndex = ""; });
+      runs.push(a);
+    } else {
+      const g = ghost(layer, cur.node, cur.rect);
+      cur.node.style.visibility = "hidden";
+      const a = g.animate(frames, opts);
+      a.finished.finally(() => { cur.node.style.visibility = ""; g.remove(); });
+      runs.push(a);
+    }
+  }
+  if (!still) {
+    for (const [key, old] of before) {
+      if (after.has(key)) continue;
+      const g = ghost(layer, old.node, old.rect);
+      const spot = landingSpot(key)?.getBoundingClientRect();
+      const to = spot
+        ? `translate(${spot.left + spot.width / 2 - (old.rect.left + old.rect.width / 2)}px, ${spot.top + spot.height / 2 - (old.rect.top + old.rect.height / 2)}px) scale(.3)`
+        : "scale(.94)";
+      const a = g.animate([{ opacity: 1, transform: "none" }, { opacity: 0, transform: to }], { duration: 640, easing: "cubic-bezier(.4, 0, .2, 1)", fill: "forwards" });
+      a.finished.finally(() => g.remove());
+      runs.push(a);
+    }
+  }
+  if (!runs.length) return;
+  document.body.append(layer);
+  playing = true;
+  Promise.allSettled(runs.map((a) => a.finished)).then(() => {
+    layer.remove();
+    playing = false;
+    if (pending) { pending = false; scheduleRender(); }
+  });
 }
 
 $("search").addEventListener("input", (e) => { state.query = e.target.value.trim().toLowerCase(); render(); });
@@ -435,7 +563,7 @@ $("stale").addEventListener("change", (e) => { state.showStale = e.target.checke
 $("flat").addEventListener("change", (e) => { state.flat = e.target.checked; render(); });
 $("close").addEventListener("click", () => { state.open = null; $("drawer").hidden = true; });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") $("close").click(); });
-setInterval(render, 30000);
+setInterval(scheduleRender, 30000);
 
 const { columns, tasks } = await api("api/tasks");
 state.columns = columns;
