@@ -149,7 +149,7 @@ button, input { font: inherit; }
 
 /* Card motion: moves are played by app.js; a changed or new card gets a soft ring that fades once it has landed. */
 .flip-layer { position: fixed; inset: 0; z-index: 2; pointer-events: none; }
-.flip-layer .card { box-shadow: 0 8px 24px rgba(16, 24, 40, .16); }
+.flip-layer .card, .card.dragging { box-shadow: 0 14px 32px rgba(16, 24, 40, .22); }
 .card.flash { animation: flash 2.4s ease-out; }
 @keyframes flash {
   0%, 35% { outline: 2px solid color-mix(in srgb, var(--c) 70%, transparent); outline-offset: 1px; }

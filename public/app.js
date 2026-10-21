@@ -458,6 +458,8 @@ function mergeEvents(a, b) {
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
 const away = () => document.hidden || !document.hasFocus();
 const EASE = "cubic-bezier(.22, 1, .36, 1)";
+// Exponential ease-out: covers most of the way early, then creeps the last pixels in, like braking.
+const BRAKE = "cubic-bezier(.16, 1, .3, 1)";
 // What the person last saw, per card: status and update time.
 const version = (t) => `${t.status}|${t.updatedAt}`;
 let seen = new Map();
@@ -498,10 +500,12 @@ async function play() {
       apply(key, t);
       showQueue();
       // A long backlog plays faster, so coming back after a night does not mean a minute of waiting.
-      const ms = Math.round(Math.max(320, Math.min(720, 7000 / (queue.size + 1))));
+      const ms = Math.round(Math.max(900, Math.min(1600, 16000 / (queue.size + 1))));
       const { moved, flashed } = render({ duration: ms, focus: key });
       if (moved) await moved;
-      else if (flashed) await pause(Math.min(ms, 400));
+      else if (flashed) await pause(Math.min(ms, 700));
+      // A short breath between cards so each move reads on its own.
+      if (queue.size) await pause(220);
     }
   } finally {
     playing = false;
@@ -559,9 +563,21 @@ function landingSpot(key) {
   return day ? day.querySelector(".day-head") : spot.querySelector("h2");
 }
 
+// Pick up (lift, tilt, turn half see-through), travel braking to a stop, set down.
+// Every keyframe lists the same transform functions so each step interpolates smoothly.
+function dragFrames(dx, dy) {
+  const at = (x, y, s, r) => `translate(${x}px, ${y}px) scale(${s}) rotate(${r}deg)`;
+  return [
+    { offset: 0, transform: at(dx, dy, 1, 0), opacity: 1, easing: "ease-out" },
+    { offset: 0.12, transform: at(dx, dy - 6, 1.04, -1.2), opacity: 0.55, easing: BRAKE },
+    { offset: 0.86, transform: at(0, -2, 1.04, 0), opacity: 0.6, easing: "ease-in-out" },
+    { offset: 1, transform: at(0, 0, 1, 0), opacity: 1 },
+  ];
+}
+
 // Redraw and animate every card from its old place. Returns `moved` (a promise for the end of the
 // motion, or null when nothing moved) and whether any card was ringed as changed.
-function render({ duration = 720, focus = null } = {}) {
+function render({ duration = 1000, focus = null } = {}) {
   const before = cardRects();
   const was = seen;
   const first = was.size === 0;
@@ -584,26 +600,31 @@ function render({ duration = 720, focus = null } = {}) {
     if (still) continue;
     if (!old) {
       runs.push(cur.node.animate([{ opacity: 0, transform: "translateY(10px) scale(.97)" }, { opacity: 1, transform: "none" }],
-        { duration, delay: duration * 0.25, easing: EASE, fill: "backwards" }));
+        { duration: duration * 0.6, delay: duration * 0.35, easing: EASE, fill: "backwards" }));
       continue;
     }
     const dx = old.rect.left - cur.rect.left;
     const dy = old.rect.top - cur.rect.top;
     if (Math.abs(dx) < 1 && Math.abs(dy) < 1) continue;
-    const frames = [{ transform: `translate(${dx}px, ${dy}px)` }, { transform: "none" }];
-    // The card being played leads; the ones making room follow a touch behind.
-    const opts = { duration, delay: key === focus ? 0 : Math.min(++i * 20, 120), easing: EASE, fill: "backwards" };
+    // The card that changed is dragged: lifted, half see-through, braking into its new place, then set down.
+    // The ones making room slide once it is on its way.
+    const dragged = changed || key === focus;
+    const frames = dragged ? dragFrames(dx, dy) : [{ transform: `translate(${dx}px, ${dy}px)` }, { transform: "none" }];
+    const opts = dragged
+      ? { duration, fill: "backwards" }
+      : { duration: duration * 0.7, delay: duration * 0.12 + Math.min(++i * 25, 150), easing: EASE, fill: "backwards" };
+    if (dragged) cur.node.classList.add("dragging");
     if (old.lane === cur.lane) {
-      // Lift a moving card over the ones it passes; a card that changed rides above the ones making room.
-      cur.node.style.zIndex = changed ? "2" : "1";
+      // Lift a moving card over the ones it passes; the dragged card rides above the ones making room.
+      cur.node.style.zIndex = dragged ? "2" : "1";
       const a = cur.node.animate(frames, opts);
-      a.finished.finally(() => { cur.node.style.zIndex = ""; });
+      a.finished.finally(() => { cur.node.style.zIndex = ""; cur.node.classList.remove("dragging"); });
       runs.push(a);
     } else {
       const g = ghost(layer, cur.node, cur.rect);
       cur.node.style.visibility = "hidden";
       const a = g.animate(frames, opts);
-      a.finished.finally(() => { cur.node.style.visibility = ""; g.remove(); });
+      a.finished.finally(() => { cur.node.style.visibility = ""; cur.node.classList.remove("dragging"); g.remove(); });
       runs.push(a);
     }
   }
@@ -615,7 +636,8 @@ function render({ duration = 720, focus = null } = {}) {
       const to = spot
         ? `translate(${spot.left + spot.width / 2 - (old.rect.left + old.rect.width / 2)}px, ${spot.top + spot.height / 2 - (old.rect.top + old.rect.height / 2)}px) scale(.3)`
         : "scale(.94)";
-      const a = g.animate([{ opacity: 1, transform: "none" }, { opacity: 0, transform: to }], { duration, easing: "cubic-bezier(.4, 0, .2, 1)", fill: "forwards" });
+      const a = g.animate([{ opacity: 1, transform: "none" }, { opacity: 0.55, transform: "translateY(-4px) scale(1.03)", offset: 0.15 }, { opacity: 0, transform: to }],
+        { duration, easing: BRAKE, fill: "forwards" });
       a.finished.finally(() => g.remove());
       runs.push(a);
     }
