@@ -109,7 +109,11 @@ test("project-thread prompts are titled with the person's words, not the wake XM
     { session_id: "w3", hook_event_name: "UserPromptSubmit", prompt: spawn },
   ]);
   assert.equal(s.get("claude-code:w3").title, "Clean up the review lane");
+  // The coordinator's note is relayed, not the person's prompt: the timeline tells them apart.
+  assert.deepEqual(s.get("claude-code:w3").events.filter((e) => e.type === "relay" || e.type === "prompt").map((e) => [e.type, e.message]),
+    [["relay", "转来: Clean up the review lane"]]);
   feed(s, claudeCodeEvents, [{ session_id: "w3", hook_event_name: "UserPromptSubmit", prompt: wake }]);
+  assert.equal(s.get("claude-code:w3").events.at(-1).type, "prompt");
   assert.equal(s.get("claude-code:w3").title, "关掉吧");
   feed(s, claudeCodeEvents, [{ session_id: "w3", hook_event_name: "UserPromptSubmit", prompt: "later words" }]);
   assert.equal(s.get("claude-code:w3").title, "关掉吧");

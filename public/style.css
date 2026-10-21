@@ -155,3 +155,15 @@ button, input { font: inherit; }
   0%, 35% { outline: 2px solid color-mix(in srgb, var(--c) 70%, transparent); outline-offset: 1px; }
   100% { outline: 2px solid transparent; outline-offset: 4px; }
 }
+
+/* Condensed timeline: the person's prompts stand out, the agent's steps fold into one line. */
+.timeline li.prompt { padding: 8px 0; }
+.timeline li.prompt > span:last-child { font-size: 13px; font-weight: 600; color: var(--text); border-left: 3px solid var(--running); padding-left: 8px; }
+.timeline li.relay > span:last-child { color: var(--muted); }
+.timeline li.relay b { font-weight: 500; color: var(--faint); }
+.timeline li.steps { color: var(--muted); cursor: pointer; }
+.timeline li.steps:hover > span:last-child { color: var(--text); }
+.timeline .tl-who { font-size: 11px; color: var(--faint); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; margin-right: 6px; }
+.timeline .tl-more { color: var(--faint); }
+.timeline li.step { color: var(--faint); font-size: 11px; padding: 2px 0; border-bottom: none; }
+.timeline li.step > span:last-child { padding-left: 12px; }
