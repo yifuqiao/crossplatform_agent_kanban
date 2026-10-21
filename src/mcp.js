@@ -9,7 +9,7 @@ const TOOLS = [
     name: "kanban_report",
     title: "Report a task to the agent kanban",
     description:
-      "Create or update a card on the user's cross-platform agent kanban. Call it when you start a task the user asked for (status running), when you are blocked on the user (waiting), when you hand back a result to check (review / 审核中), and when it is done or failed. Omit task_key to create a new card; pass the returned task_key on later calls. Pass parent_key when this work was spun up by another task on the board. For waiting cards that need a human pick, optionally pass question, background, and options (label+value buttons). If the human already chose in chat, pass choice_resolved so the board marks the card 已选 (first choice wins). The result lists update_requests: cards of your source where the user pressed Get update; answer each with a kanban_report carrying a short summary brief.",
+      "Create or update a card on the user's cross-platform agent kanban. Call it when you start a task the user asked for (status running), when you are blocked on the user (waiting), when you hand back a result to check (review / 审核中), and when it is done or failed. Omit task_key to create a new card; pass the returned task_key on later calls. Pass parent_key when this work was spun up by another task on the board. For waiting cards that need a human pick, optionally pass question, background, and options (label+value buttons). If the human already chose in chat, pass choice_resolved so the board marks the card 已选 (first choice wins). The result lists update_requests: cards of your source where the user pressed Get update; answer each with a kanban_report carrying a short summary brief, plus needs_you when the user has to do something.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -20,6 +20,7 @@ const TOOLS = [
         status: { type: "string", enum: STATUSES },
         note: { type: "string", maxLength: 2000, description: "One timeline line describing what just happened." },
         summary: { type: "string", maxLength: 4000, description: "Current overall state or final result. A summary answers an open update request on this card." },
+        needs_you: { type: "string", maxLength: 300, description: "One line: what the user must do for this to move on (approve, answer, provide something). Shown on the card as 需要你. Omit when nothing is needed; a summary without it clears the old one." },
         source: { type: "string", maxLength: 60, description: "Your platform, e.g. claude-code, claude-chat, chatgpt, grok-bot. Used when creating. A per-source key fixes this to its own source." },
         agent_name: { type: "string", maxLength: 60, description: "Which bot or agent on that platform is doing the work, e.g. ops-bot. Shown on the card next to the source." },
         parent_key: { type: "string", description: "task_key of the card that spun this work up." },
@@ -67,7 +68,7 @@ const TOOLS = [
     name: "kanban_update_requests",
     title: "List cards waiting for an update brief",
     description:
-      "List cards where the user pressed Get update and is waiting for a brief. For each one you own, call kanban_report with its task_key, a summary (the latest state in a few lines: progress, numbers, blockers, next step) and a note. That clears the request.",
+      "List cards where the user pressed Get update and is waiting for a brief. For each one you own, call kanban_report with its task_key, a summary (the latest state in a few lines: progress, numbers, blockers, next step), needs_you if the user has to act, and a note. That clears the request.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -129,7 +130,7 @@ function brief(t, store, principal) {
 function updateRequests(store, principal, source) {
   return store.updateRequests({ source })
     .filter((t) => principal.admin || (canSee(principal, t) && t.createdBy === ownerOf(principal)))
-    .map((t) => ({ task_key: t.key, title: t.title, status: t.status, requested_at: t.updateRequest.at }));
+    .map((t) => ({ task_key: t.key, title: t.title, status: t.status, requested_at: t.updateRequest.at, due_at: t.updateRequest.dueAt || null }));
 }
 
 // A per-source key can only create and update cards as its own source (and bot, when bound),
@@ -179,7 +180,7 @@ function callTool(store, name, args = {}, principal = ADMIN) {
       ? { value: args.choice_resolved.value } // drop any client "source"; store forces chat
       : undefined;
     const { task, choice_rejected } = store.apply({
-      key, title: args.title, status: args.status, message: args.note, summary: args.summary,
+      key, title: args.title, status: args.status, message: args.note, summary: args.summary, needs_you: args.needs_you,
       parent: args.parent_key, links: args.links, kind: existing || !principal.admin ? undefined : "chat", agent_name: as.agentName,
       created_by: existing ? undefined : ownerOf(principal), brief: Boolean(args.summary), type: args.summary ? "brief" : undefined,
       question: args.question, background: args.background, options: args.options,

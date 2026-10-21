@@ -74,6 +74,9 @@ button, input { font: inherit; }
 .flag.silent { --f: var(--failed); }
 .flag.idle { --f: var(--muted); }
 .flag.asked { --f: var(--running); }
+.flag.late { --f: var(--failed); }
+.needs-you { margin-top: 6px; font-size: 13px; padding: 4px 8px; border-radius: 6px; background: color-mix(in srgb, var(--waiting) 12%, transparent); color: var(--text); }
+.needs-you b { color: var(--waiting); font-weight: 600; }
 .flag.chosen { --f: var(--done); }
 .flag.self { --f: var(--muted); }
 .rollup { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; }
@@ -121,12 +124,16 @@ button, input { font: inherit; }
 .timeline li { display: grid; grid-template-columns: 8px 64px 1fr; gap: 10px; align-items: baseline; padding: 5px 0; border-bottom: 1px solid var(--line); font-size: 12px; }
 .timeline .sdot { transform: translateY(-1px); }
 .timeline time { color: var(--faint); font-variant-numeric: tabular-nums; }
-.timeline span:last-child { word-break: break-word; }
+.timeline span:last-child { word-break: break-word; white-space: pre-line; }
 .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 20px; }
 .action, .danger { border: 1px solid var(--running); color: var(--running); background: none; border-radius: 6px; padding: 4px 12px; cursor: pointer; }
 .danger { border-color: var(--line); color: var(--failed); }
 .danger:hover { border-color: var(--failed); }
 .asked-note { margin: 20px 0 0; color: var(--running); font-size: 13px; }
+.asked-note.late { color: var(--failed); }
+.asked-note.muted { color: var(--muted); }
+.ask { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ask-hint { font-size: 12px; color: var(--muted); }
 
 @media (max-width: 760px) {
   .bar { padding: 10px 16px; gap: 8px; }

@@ -2,8 +2,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
-import { normalizeStatus, TERMINAL } from "./status.js";
-import { junkTitle, recoverTitle } from "./adapters/common.js";
+import { COLUMNS, normalizeStatus, TERMINAL } from "./status.js";
+import { junkTitle, oneLine, recoverTitle } from "./adapters/common.js";
+import { dueAt, updatePath } from "./update-path.js";
 
 const MAX_EVENTS = 200;
 const MAX_SEEN_IDS = 500;
@@ -225,6 +226,9 @@ export class Store extends EventEmitter {
     if (agentName) task.agentName = agentName;
     const summary = cleanString(input.summary, 4000);
     if (summary) task.summary = summary;
+    // What the agent needs the person to do. Every brief restates it, so a brief without one clears it.
+    const needsYou = cleanString(input.needs_you, 300);
+    if (needsYou || input.needs_you === "" || (input.brief && summary)) task.needsYou = needsYou ? { text: needsYou, at: now } : null;
     const cwd = cleanString(input.cwd, 1000);
     if (cwd) task.cwd = cwd;
     // Task url: http(s) only — reject javascript:, data:, etc.
@@ -302,7 +306,10 @@ export class Store extends EventEmitter {
       task.status = status;
       if (status === "running" && !task.startedAt) task.startedAt = now;
       task.endedAt = TERMINAL.has(status) ? now : null;
-      if (TERMINAL.has(status)) task.updateRequest = null;
+      if (TERMINAL.has(status)) {
+        task.updateRequest = null;
+        task.needsYou = null;
+      }
     } else if (status === "running" && !task.startedAt) {
       task.startedAt = now;
     }
@@ -331,9 +338,9 @@ export class Store extends EventEmitter {
     }
 
     // A brief with no note of its own still goes on the timeline.
-    const message = cleanString(input.message, 2000) || (input.brief && pendingRequest && summary ? summary.slice(0, 2000) : undefined);
+    const message = cleanString(input.message, 2000) || (input.brief && pendingRequest && summary ? `${summary}${needsYou ? `\n需要你：${needsYou}` : ""}`.slice(0, 2000) : undefined);
     if (message || statusChanged) {
-      task.events.push({ id: eventId || randomUUID(), at: now, status: status || null, message: message || null, type: cleanString(input.type, 40) || null });
+      task.events.push({ id: eventId || randomUUID(), at: now, status: status || null, message: message || null, type: cleanString(input.type, 40) || (input.brief && summary ? "brief" : null) });
       if (task.events.length > MAX_EVENTS) task.events.splice(0, task.events.length - MAX_EVENTS);
     }
     // A brief written by the agent answers an open "Get update" request.
@@ -356,19 +363,43 @@ export class Store extends EventEmitter {
   }
 
   // The board only records the ask; the agent picks it up through MCP (kanban_report /
-  // kanban_update_requests) and answers with a brief. Nothing is sent to the agent or the relay.
-  requestUpdate(key, { by } = {}) {
+  // kanban_update_requests) or its hook, and answers with a brief. Nothing is sent to the agent or
+  // the relay. Cards the board pulls (Grok relay, Cursor) are answered at once from the pulled state,
+  // since nobody on the other side can be asked. See update-path.js.
+  requestUpdate(key, { by, now = new Date() } = {}) {
     const task = this.tasks.get(key);
+    const via = updatePath(task);
     // A placeholder has no agent of its own to answer; its status only rolls up from children.
-    if (!task || task.placeholder) return null;
+    if (!via || via === "none") return null;
     if (task.updateRequest) return task;
-    const at = new Date().toISOString();
-    task.updateRequest = { at, by: cleanString(by, 80) || null };
+    const at = now.toISOString();
+    task.updateRequest = { at, by: cleanString(by, 80) || null, via, dueAt: dueAt(at, via) };
     task.events.push({ id: randomUUID(), at, status: null, message: "Update requested from the board", type: "update_request" });
+    if (via === "board") this.boardBrief(task, now);
     if (task.events.length > MAX_EVENTS) task.events.splice(0, task.events.length - MAX_EVENTS);
     this.scheduleSave();
     this.emit("change", task);
     return task;
+  }
+
+  // The board's own answer for a polled card: its latest status and line, and how old they are.
+  boardBrief(task, now) {
+    const last = task.events.findLast((e) => e.message && !["update_request", "brief"].includes(e.type));
+    const mins = Math.max(0, Math.round((now - Date.parse(task.updatedAt)) / 60_000));
+    const from = task.source === "cursor-cloud" ? "Cursor" : "Grok relay";
+    const label = COLUMNS.find((c) => c.id === task.status)?.label || task.status;
+    const at = now.toISOString();
+    task.events.push({
+      id: randomUUID(), at, status: null, type: "brief",
+      message: [
+        `看板代答（${task.source} 收不到请求；看板每 30 秒从 ${from} 拉一次，这张卡最后变化在 ${mins} 分钟前）：${label}`,
+        task.summary && `归纳：${oneLine(task.summary, 400)}`,
+        last && `最近一条：${oneLine(last.message, 300)}`,
+        task.meta?.waiting_on && `在等${task.meta.waiting_on}`,
+      ].filter(Boolean).join("\n"),
+    });
+    task.updateRequest = null;
+    task.briefAt = at;
   }
 
   // Board click only — always records source "board". Chat must use choice_resolved via apply.
@@ -512,5 +543,6 @@ export class Store extends EventEmitter {
 
 export function publicTask(task, { events = true } = {}) {
   const { seen, ...rest } = task;
+  rest.updateVia = updatePath(task);
   return events ? rest : { ...rest, events: undefined, eventCount: task.events.length };
 }

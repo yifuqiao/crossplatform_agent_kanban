@@ -147,7 +147,16 @@ Grok Bot 不需要额外往看板上报，也不需要 MCP：看板只读 relay�
 - `kanban_update_requests` — 列出等着 agent 写更新简报的卡（可按 `source` 过滤）。
 - `kanban_get` — 读一张卡的时间线和子活动。
 
-**Get update**：卡片详情里的 Get update 按钮只在卡上记一笔“请求更新”，看板不会主动联系 agent 或 relay。agent 下次调用 `kanban_report` 时会在返回值里看到这个请求（或用 `kanban_update_requests` 主动查），用带 `summary` 的 `kanban_report` 回写最新简报，请求随之清除。卡片进入 done / failed 时请求也会清除。
+**Get update（请求更新）**：按钮只在卡上记一笔请求，看板不会主动联系 agent 或 relay。谁能回、多久回，看卡是怎么来的：
+
+| 卡的来路 | 谁来回 | 时限 |
+| --- | --- | --- |
+| 通过看板 MCP 建的卡 | agent 下次调用 `kanban_report`（返回值里的 `update_requests`）或 `kanban_update_requests` 时看到，用带 `summary` 的 `kanban_report` 回写 | 30 分钟；那个对话没人在用就不会回 |
+| Claude Code hook 卡（`claude-code` / `claude-code-web`） | hook 下次上报时拿到请求，在会话的下一次工具调用或这一轮结束时交给会话；会话用 `akb report --key K --brief --summary ...` 回写 | 10 分钟；会话空闲时要等你回到会话说话 |
+| 看板轮询的卡（`grok-bot`、`cursor-cloud`） | 对方收不到请求，看板立即用最近拉到的状态代答 | 立即 |
+| 其他（Cursor / Codex hook、`akb run`、手动上报） | 没有通道 | 不显示按钮，接口返回 409 |
+
+超过时限还没回，卡上标“请求超时”。卡片进入 done / failed 时请求清除。
 
 **远程（claude.ai、ChatGPT 等）**：聊天平台的服务器要能访问看板，所以需要公网 HTTPS 地址（例如 Cloudflare Tunnel / Tailscale Funnel / 反向代理），并且**必须设置 `AKB_TOKEN`**。能自己带 `Authorization` 头的客户端继续用静态 Bearer。claude.ai / Claude iOS 的自定义 connector 不会发静态头，走看板自己的 OAuth（全部在 `/kanban/` 下面，不经过域名根上的 relay 登录页）。步骤和部署注意见 [`deploy/OAUTH.md`](deploy/OAUTH.md)。MCP 地址填 `https://relay.onetopway.com/kanban/mcp`，不要加 `?token=`。
 
@@ -220,7 +229,7 @@ curl -X POST http://127.0.0.1:7311/api/events -H 'content-type: application/json
 | `GET` | `/api/tasks` | 所有卡片（可选 `?status=`、`?source=`） |
 | `GET` | `/api/tasks/<key>` | 一张卡和它的子卡 |
 | `DELETE` | `/api/tasks/<key>` | 删除卡片及所有子孙 |
-| `POST` | `/api/tasks/<key>/update-request` | Get update：记录“请求更新简报”（已结束的卡返回 409） |
+| `POST` | `/api/tasks/<key>/update-request` | Get update：记录“请求更新简报”（已结束的卡、没有回应通道的卡返回 409；轮询卡由看板立即代答） |
 | `GET` | `/api/stream` | SSE 实时推送（`task`、`remove`） |
 | `POST` | `/mcp` | MCP JSON-RPC |
 | `POST` | `/webhooks/cursor` | Cursor cloud agent webhook |

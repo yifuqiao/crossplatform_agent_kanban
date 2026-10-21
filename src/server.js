@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { timingSafeEqual } from "node:crypto";
 import { Store, parseRef, publicTask } from "./store.js";
 import { COLUMNS, TERMINAL } from "./status.js";
+import { updatePath } from "./update-path.js";
 import { handleMcp } from "./mcp.js";
 import { matchSourceToken, parseSourceTokens } from "./source-tokens.js";
 import { cursorAgentEvent, verifyCursorWebhook, createCursorCloudPoller } from "./pollers/cursor-cloud.js";
@@ -301,7 +302,11 @@ export function createServer({
       return send(res, results[0].choice_rejected.status, results[0]);
     }
     const status = results.every((r) => r.ok) ? 200 : results.some((r) => r.ok) ? 207 : 400;
-    return send(res, status, Array.isArray(body) ? { results } : results[0]);
+    // Open Get update requests on the cards just written, so a hook can hand them to its session.
+    const update_requests = [...new Set(results.filter((r) => r.ok).map((r) => r.key))]
+      .map((k) => store.get(k)).filter((t) => t?.updateRequest)
+      .map((t) => ({ task_key: t.key, requested_at: t.updateRequest.at, due_at: t.updateRequest.dueAt || null }));
+    return send(res, status, Array.isArray(body) ? { results, update_requests } : { ...results[0], update_requests });
   }
 
   const server = http.createServer(async (req, res) => {
@@ -562,8 +567,9 @@ export function createServer({
         });
       }
 
-      // Get update: record the ask on the card. Agents read it through MCP and answer with a brief;
-      // the board itself never contacts the agent or the relay.
+      // Get update: record the ask on the card. Agents read it through MCP or their hook and answer
+      // with a brief; polled cards are answered by the board at once. The board never contacts the
+      // agent or the relay (see update-path.js).
       const ask = url.pathname.match(/^\/api\/tasks\/([^/]+)\/update-request$/);
       if (ask) {
         if (req.method !== "POST") return send(res, 405, { error: "method not allowed" }, { allow: "POST" });
@@ -572,8 +578,9 @@ export function createServer({
         if (!task) return send(res, 404, { error: "not found" });
         if (TERMINAL.has(task.status)) return send(res, 409, { error: `task is ${task.status}` });
         if (task.placeholder) return send(res, 409, { error: "this card only groups other tasks; ask one of them" });
+        if (updatePath(task) === "none") return send(res, 409, { error: `${task.source} has no way to receive this request` });
         store.requestUpdate(key, { by: sessionOk(req)?.uid });
-        return send(res, 200, { ok: true, updateRequest: task.updateRequest });
+        return send(res, 200, { ok: true, updateRequest: task.updateRequest, answered: !task.updateRequest });
       }
 
       // Needs-you option click: record the choice on the card. Opening bots poll via kanban_get_choice;
