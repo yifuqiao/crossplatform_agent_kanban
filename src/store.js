@@ -503,7 +503,7 @@ export class Store extends EventEmitter {
     let dirty = false;
     for (const t of [...this.tasks.values()]) {
       if (!t.source.startsWith("codex") || t.placeholder || t.titled || (t.parentKey && !t.autoGroup)) continue;
-      if (t.events?.some((e) => e.type && !["session", "stop"].includes(e.type))) continue;
+      if (!t.events?.length || t.events.some((e) => !["session", "stop"].includes(e.type))) continue;
       if (this.children(t.key).length) continue;
       this.tasks.delete(t.key);
       dirty = true;

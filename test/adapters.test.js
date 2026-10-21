@@ -362,7 +362,14 @@ test("startup drops promptless Codex cards and the old summary card, keeps real 
   const raw = JSON.parse(fs.readFileSync(path.join(dir, "state.json"), "utf8"));
   raw.tasks.push({ ...raw.tasks[0], key: "codex:_idle", externalId: "_idle", placeholder: true, titled: false, events: [], parentKey: null });
   fs.writeFileSync(path.join(dir, "state.json"), JSON.stringify(raw));
+  // a card first seen through a tool call (status event with no type) is live work, not an empty thread
+  a.apply({ source: "codex", external_id: "midway", status: "running" });
+  a.flush();
+  const raw2 = JSON.parse(fs.readFileSync(path.join(dir, "state.json"), "utf8"));
+  raw2.tasks.push(raw.tasks.at(-1));
+  fs.writeFileSync(path.join(dir, "state.json"), JSON.stringify(raw2));
   const b = new Store({ dataDir: dir });
+  assert.ok(b.get("codex:midway"));
   assert.ok(b.get("codex:real"));
   assert.equal(b.get("codex:empty"), null);
   assert.equal(b.get("codex:_idle"), null);
