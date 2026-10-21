@@ -55,7 +55,7 @@ function cleanLinks(links) {
     .map((l) => (typeof l === "string" ? { url: l } : l))
     .filter((l) => l && typeof l.url === "string" && /^https?:\/\//.test(l.url))
     .slice(0, 20)
-    .map((l) => ({ url: l.url.slice(0, 1000), label: cleanString(l.label, 80) || undefined }));
+    .map((l) => ({ url: l.url.slice(0, 1000), label: cleanString(l.label, 80) || undefined, ...(l.output === true ? { output: true } : {}) }));
 }
 
 // Needs-you option buttons: each needs a non-empty label and value.
@@ -186,12 +186,18 @@ export class Store extends EventEmitter {
     let status = normalizeStatus(rawStatus);
     if (rawStatus != null && !status) throw new Error(`unknown status: ${rawStatus}`);
     const task = this.ensure(cleanString(ref.source, 60), cleanString(ref.externalId, 200), now);
-    // awaiting_review: the agent opened a PR. idle: its turn is over and it waits for the person's next
-    // word. An idle card stays in 进行中, except that one with an open PR goes back to 审核中.
+    // awaiting_review: the agent opened a PR. awaiting_person: this turn handed the person a result or a
+    // decision; new_turn (the person's next prompt) clears it. idle: the turn is over and the agent waits
+    // for the next word. An idle card goes to 等您 when the turn handed something over, back to 审核中
+    // when a PR is open, and otherwise stays in 进行中.
     if (input.awaiting_review === true) task.awaitingReview = true;
+    if (input.new_turn === true) task.awaitingPerson = false;
+    if (input.awaiting_person === true) task.awaitingPerson = true;
     const idle = input.idle === true;
     // A waiting card whose turn has ended no longer waits on a permission prompt: back to 进行中.
-    if (idle && !status && (task.status === "running" || task.status === "waiting")) status = task.awaitingReview ? "review" : "running";
+    if (idle && !status && (task.status === "running" || task.status === "waiting")) {
+      status = task.awaitingPerson ? "waiting" : task.awaitingReview ? "review" : "running";
+    }
     // Who created the card through MCP (e.g. "mcp:claude-code"); pollers and hooks leave it unset.
     if (isNew) {
       const createdBy = cleanString(input.created_by, 200);
@@ -231,7 +237,9 @@ export class Store extends EventEmitter {
     const url = cleanString(input.url, 1000);
     if (url && /^https?:\/\//i.test(url)) task.url = url;
     for (const link of cleanLinks(input.links)) {
-      if (!task.links.some((l) => l.url === link.url)) task.links.push(link);
+      const known = task.links.find((l) => l.url === link.url);
+      if (!known) task.links.push(link);
+      else if (link.output) known.output = true;
     }
     // The agent's step list, replaced whole on each update.
     if (Array.isArray(input.checklist)) {

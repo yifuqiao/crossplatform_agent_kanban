@@ -56,9 +56,9 @@ MCP 地址是 `https://relay.onetopway.com/kanban/mcp`，Cursor webhook 是 `htt
 | `SessionStart` | 新卡片，标题 `Claude Code · <目录>` |
 | `UserPromptSubmit` | → Running；你说的第一句话成为标题（项目线程里取你的原话，不取 XML 外壳） |
 | `PreToolUse` | 保持 Running（不再把每条命令写上卡片）；`Task`/`Agent` 工具 → **新的子卡（subagent）** |
-| `PostToolUse` (`Task\|Agent\|Bash\|TodoWrite\|mcp__.*__(set_thread_resolved\|rename_thread\|set_session_title\|create_pull_request\|update_progress_checklist)`) | 子卡 → Done；进度清单 / TodoWrite → 卡片上的勾选清单；开了 PR → 审核中；线程改名 → 卡片标题；项目线程关闭 → Done |
+| `PostToolUse` (`Task\|Agent\|Bash\|TodoWrite\|mcp__.*__(set_thread_resolved\|rename_thread\|set_session_title\|create_pull_request\|update_progress_checklist\|post_message\|request_decision)`) | 子卡 → Done；进度清单 / TodoWrite → 卡片上的勾选清单；回复里交了产出（文档、页面、链接）→ 链接挂到卡上，这一轮结束后进等您；发了决定卡 → 这一轮结束后进等您；开了 PR → 审核中；线程改名 → 卡片标题；项目线程关闭 → Done |
 | `Notification` | → 等您（要权限）；“等你输入”只算空闲 |
-| `Stop` | 留在原列，标“空闲”（这一轮做完了）；开过 PR 的回到审核中 |
+| `Stop` | 这一轮交了产出或发了决定卡的进等您（你回话后回到进行中）；开过 PR 的回到审核中；其余留在原列，标“空闲” |
 | `SessionEnd` | → Done |
 
 **Claude Code on the web（claude.ai/code 云端会话）**：**不要**把管理员的 `AKB_TOKEN` 放进 claude.ai 云端环境，它能读写看板上的所有卡。
