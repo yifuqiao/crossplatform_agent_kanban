@@ -163,7 +163,7 @@ async function pickChoice(t, value, btn) {
     if (res.choice) {
       const cur = state.tasks.get(t.key) || t;
       state.tasks.set(t.key, { ...cur, choice: res.choice });
-      render();
+      scheduleRender();
     }
   } catch (err) {
     if (btn) btn.disabled = false;
@@ -222,7 +222,7 @@ function card(t, { showParent = false, hideTree = false } = {}) {
   ].filter(Boolean);
   // In the needs-you lane every waiting card is listed once; hide the nested tree so a waiting child is not shown twice.
   const showTree = !hideTree && !state.flat;
-  return el("article", { class: `card${attention ? " attention-child" : ""}${stale ? " stale" : ""}`, style: `--c:var(--${t.status})`, onclick: () => openTask(t.key) },
+  return el("article", { class: `card${attention ? " attention-child" : ""}${stale ? " stale" : ""}`, "data-key": t.key, style: `--c:var(--${t.status})`, onclick: () => openTask(t.key) },
     el("div", { class: "top" }, badge(t.source, t.agentName),
       el("span", { class: "time", title: `最后上报 ${new Date(heard).toLocaleString()}` }, since(heard))),
     parent && el("div", { class: "parent-line" }, `↳ ${displayTitle(parent)}`),
@@ -280,7 +280,7 @@ function dayGroups(colId, cards) {
     const id = `${colId}|${g.id}`;
     const open = Boolean(g.open) !== state.toggled.has(id);
     const shown = finished && !state.expanded.has(id) ? list.slice(0, FINISHED_LIMIT) : list;
-    return el("div", { class: `day${open ? " open" : ""}` },
+    return el("div", { class: `day${open ? " open" : ""}`, "data-keys": list.map((t) => t.key).join(" ") },
       el("button", { class: "day-head", "aria-expanded": String(open), title: open ? "点击折叠" : "点击展开",
         onclick: () => { state.toggled.has(id) ? state.toggled.delete(id) : state.toggled.add(id); render(); } },
         el("span", { class: "caret" }, open ? "▾" : "▸"), g.label, el("span", { class: "n" }, list.length)),
@@ -289,7 +289,7 @@ function dayGroups(colId, cards) {
   });
 }
 
-function render() {
+function draw() {
   renderSources();
   const candidates = [...state.tasks.values()].filter((t) => (state.flat || isRoot(t)) && matches(t));
   const staleCount = candidates.filter(staleReason).length;
@@ -309,7 +309,7 @@ function render() {
     const cards = cardsForColumn(col.id, visible);
     byStatus[col.id] = cards.length;
     const label = STATUS_LABEL[col.id] || col.label;
-    return el("section", { class: `column${cards.length ? "" : " empty"}`, style: `--c:var(--${col.id})`, title: cards.length ? null : `${label}：暂无` },
+    return el("section", { class: `column${cards.length ? "" : " empty"}`, "data-col": col.id, style: `--c:var(--${col.id})`, title: cards.length ? null : `${label}：暂无` },
       el("h2", {}, el("span", { class: "dot" }), label, el("span", { class: "n" }, cards.length)),
       dayGroups(col.id, cards));
   }));
@@ -322,6 +322,7 @@ function render() {
     stat(byStatus.failed || 0, "失败"),
   ].filter(Boolean));
   if (state.open) renderDetail();
+  seen = new Map([...state.tasks.values()].map((t) => [t.key, version(t)]));
 }
 
 async function api(path, opts) {
@@ -438,15 +439,10 @@ function connect() {
   es.onerror = () => { $("conn").classList.remove("live"); $("conn").textContent = "已断开，重连中…"; };
   es.addEventListener("task", (e) => {
     const t = JSON.parse(e.data);
-    const prev = state.tasks.get(t.key);
-    // Stream frames carry recent events only; keep the full timeline if the drawer loaded it.
-    if (prev?.events?.length > t.events.length && state.open === t.key) t.events = mergeEvents(prev.events, t.events);
-    state.tasks.set(t.key, t);
-    scheduleRender();
+    enqueue(t.key, t);
   });
   es.addEventListener("remove", (e) => {
-    for (const k of JSON.parse(e.data)) state.tasks.delete(k);
-    scheduleRender();
+    for (const k of JSON.parse(e.data)) enqueue(k, null);
   });
 }
 
@@ -455,11 +451,200 @@ function mergeEvents(a, b) {
   return [...a, ...b.filter((e) => !seen.has(e.id))];
 }
 
+// Stream updates are queued and applied one card at a time: each card glides to its new place
+// (FLIP: measure, redraw, play from where it was) and lands before the next one moves.
+// While the window is in the background nothing is applied, so the board stays as the person left
+// it; when they come back the queue plays out card by card, so they can see what happened.
+const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+const away = () => document.hidden || !document.hasFocus();
+const EASE = "cubic-bezier(.22, 1, .36, 1)";
+// Exponential ease-out: covers most of the way early, then creeps the last pixels in, like braking.
+const BRAKE = "cubic-bezier(.16, 1, .3, 1)";
+// What the person last saw, per card: status and update time.
+const version = (t) => `${t.status}|${t.updatedAt}`;
+let seen = new Map();
+// key -> latest stream frame, or null when removed; a key keeps its place in line when it updates again.
+const queue = new Map();
+let playing = false;
 let pending = false;
+
+function enqueue(key, t) {
+  queue.set(key, t);
+  showQueue();
+  if (!away()) play();
+}
+
+function showQueue() {
+  const n = $("paused");
+  n.hidden = queue.size === 0;
+  n.textContent = playing ? `回放中 · 还有 ${queue.size} 张` : `${queue.size} 张卡有变化，回到窗口时播放`;
+}
+
+function apply(key, t) {
+  if (!t) return void state.tasks.delete(key);
+  const prev = state.tasks.get(key);
+  // Stream frames carry recent events only; keep the full timeline if the drawer loaded it.
+  if (prev?.events?.length > t.events.length && state.open === key) t.events = mergeEvents(prev.events, t.events);
+  state.tasks.set(key, t);
+}
+
+const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function play() {
+  if (playing) return;
+  playing = true;
+  try {
+    while (queue.size && !away()) {
+      const [key, t] = queue.entries().next().value;
+      queue.delete(key);
+      apply(key, t);
+      showQueue();
+      // A long backlog plays faster, so coming back after a night does not mean a minute of waiting.
+      const ms = Math.round(Math.max(900, Math.min(1600, 16000 / (queue.size + 1))));
+      const { moved, flashed } = render({ duration: ms, focus: key });
+      if (moved) await moved;
+      else if (flashed) await pause(Math.min(ms, 700));
+      // A short breath between cards so each move reads on its own.
+      if (queue.size) await pause(220);
+    }
+  } finally {
+    playing = false;
+    showQueue();
+  }
+}
+
+// Redraws that are not stream updates (the 30 s clock, a choice being recorded) wait while the window is away.
 function scheduleRender() {
-  if (pending) return;
-  pending = true;
-  requestAnimationFrame(() => { pending = false; render(); });
+  if (away()) return void (pending = true);
+  if (!playing) render();
+}
+
+// Back in front of the person: play what was queued, after a beat so their eyes have arrived.
+function resume() {
+  if (away()) return;
+  setTimeout(() => {
+    if (away()) return;
+    if (pending && !playing) {
+      pending = false;
+      render();
+    }
+    play();
+  }, queue.size ? 250 : 0);
+}
+window.addEventListener("focus", resume);
+document.addEventListener("visibilitychange", resume);
+
+function cardRects() {
+  const m = new Map();
+  for (const n of document.querySelectorAll(".card[data-key]")) {
+    if (!m.has(n.dataset.key)) m.set(n.dataset.key, { node: n, rect: n.getBoundingClientRect(), lane: n.closest("#attention") ? "attention" : "board" });
+  }
+  return m;
+}
+
+// A fixed-position copy of a card, for moves the real card cannot make inside its own container
+// (between the needs-you lane and the board, or off the board into a folded spot).
+function ghost(layer, node, rect) {
+  const g = node.cloneNode(true);
+  g.removeAttribute("data-key");
+  Object.assign(g.style, { position: "absolute", left: `${rect.left}px`, top: `${rect.top}px`, width: `${rect.width}px`, height: `${rect.height}px`, margin: "0" });
+  layer.append(g);
+  return g;
+}
+
+// Where a card that is no longer drawn went: the header of its day group (folded, or past the
+// finished-card limit), else its new column (or the needs-you lane).
+function landingSpot(key) {
+  const t = state.tasks.get(key);
+  if (!t) return null;
+  const spot = t.status === "waiting" ? $("attention") : document.querySelector(`.column[data-col="${t.status}"]`);
+  if (!spot || spot.hidden) return null;
+  const day = [...spot.querySelectorAll(".day[data-keys]")].find((d) => d.dataset.keys.split(" ").includes(key));
+  return day ? day.querySelector(".day-head") : spot.querySelector("h2");
+}
+
+// Pick up (lift, tilt, turn half see-through), travel braking to a stop, set down.
+// Every keyframe lists the same transform functions so each step interpolates smoothly.
+function dragFrames(dx, dy) {
+  const at = (x, y, s, r) => `translate(${x}px, ${y}px) scale(${s}) rotate(${r}deg)`;
+  return [
+    { offset: 0, transform: at(dx, dy, 1, 0), opacity: 1, easing: "ease-out" },
+    { offset: 0.12, transform: at(dx, dy - 6, 1.04, -1.2), opacity: 0.55, easing: BRAKE },
+    { offset: 0.86, transform: at(0, -2, 1.04, 0), opacity: 0.6, easing: "ease-in-out" },
+    { offset: 1, transform: at(0, 0, 1, 0), opacity: 1 },
+  ];
+}
+
+// Redraw and animate every card from its old place. Returns `moved` (a promise for the end of the
+// motion, or null when nothing moved) and whether any card was ringed as changed.
+function render({ duration = 1000, focus = null } = {}) {
+  const before = cardRects();
+  const was = seen;
+  const first = was.size === 0;
+  draw();
+  if (first) return { moved: null, flashed: false };
+  const after = cardRects();
+  const still = reducedMotion.matches;
+  const layer = el("div", { class: "flip-layer", "aria-hidden": "true" });
+  const runs = [];
+  let flashed = false;
+  let i = 0;
+  const order = [...after].sort(([, a], [, b]) => a.rect.top - b.rect.top || a.rect.left - b.rect.left);
+  for (const [key, cur] of order) {
+    const old = before.get(key);
+    const changed = !old || was.get(key) !== seen.get(key);
+    if (changed) {
+      cur.node.classList.add("flash");
+      flashed = true;
+    }
+    if (still) continue;
+    if (!old) {
+      runs.push(cur.node.animate([{ opacity: 0, transform: "translateY(10px) scale(.97)" }, { opacity: 1, transform: "none" }],
+        { duration: duration * 0.6, delay: duration * 0.35, easing: EASE, fill: "backwards" }));
+      continue;
+    }
+    const dx = old.rect.left - cur.rect.left;
+    const dy = old.rect.top - cur.rect.top;
+    if (Math.abs(dx) < 1 && Math.abs(dy) < 1) continue;
+    // The card that changed is dragged: lifted, half see-through, braking into its new place, then set down.
+    // The ones making room slide once it is on its way.
+    const dragged = changed || key === focus;
+    const frames = dragged ? dragFrames(dx, dy) : [{ transform: `translate(${dx}px, ${dy}px)` }, { transform: "none" }];
+    const opts = dragged
+      ? { duration, fill: "backwards" }
+      : { duration: duration * 0.7, delay: duration * 0.12 + Math.min(++i * 25, 150), easing: EASE, fill: "backwards" };
+    if (dragged) cur.node.classList.add("dragging");
+    if (old.lane === cur.lane) {
+      // Lift a moving card over the ones it passes; the dragged card rides above the ones making room.
+      cur.node.style.zIndex = dragged ? "2" : "1";
+      const a = cur.node.animate(frames, opts);
+      a.finished.finally(() => { cur.node.style.zIndex = ""; cur.node.classList.remove("dragging"); });
+      runs.push(a);
+    } else {
+      const g = ghost(layer, cur.node, cur.rect);
+      cur.node.style.visibility = "hidden";
+      const a = g.animate(frames, opts);
+      a.finished.finally(() => { cur.node.style.visibility = ""; cur.node.classList.remove("dragging"); g.remove(); });
+      runs.push(a);
+    }
+  }
+  if (!still) {
+    for (const [key, old] of before) {
+      if (after.has(key)) continue;
+      const g = ghost(layer, old.node, old.rect);
+      const spot = landingSpot(key)?.getBoundingClientRect();
+      const to = spot
+        ? `translate(${spot.left + spot.width / 2 - (old.rect.left + old.rect.width / 2)}px, ${spot.top + spot.height / 2 - (old.rect.top + old.rect.height / 2)}px) scale(.3)`
+        : "scale(.94)";
+      const a = g.animate([{ opacity: 1, transform: "none" }, { opacity: 0.55, transform: "translateY(-4px) scale(1.03)", offset: 0.15 }, { opacity: 0, transform: to }],
+        { duration, easing: BRAKE, fill: "forwards" });
+      a.finished.finally(() => g.remove());
+      runs.push(a);
+    }
+  }
+  if (!runs.length) return { moved: null, flashed };
+  document.body.append(layer);
+  return { moved: Promise.allSettled(runs.map((a) => a.finished)).then(() => layer.remove()), flashed };
 }
 
 $("search").addEventListener("input", (e) => { state.query = e.target.value.trim().toLowerCase(); render(); });
@@ -467,7 +652,7 @@ $("stale").addEventListener("change", (e) => { state.showStale = e.target.checke
 $("flat").addEventListener("change", (e) => { state.flat = e.target.checked; render(); });
 $("close").addEventListener("click", () => { state.open = null; $("drawer").hidden = true; });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") $("close").click(); });
-setInterval(render, 30000);
+setInterval(scheduleRender, 30000);
 
 const { columns, tasks } = await api("api/tasks");
 state.columns = columns;

@@ -19,6 +19,7 @@ button, input { font: inherit; }
 .conn { font-size: 12px; color: var(--failed); white-space: nowrap; }
 .conn::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: currentColor; margin-right: 5px; transform: translateY(-1px); }
 .conn.live { color: var(--done); }
+.paused { font-size: 12px; color: var(--muted); white-space: nowrap; }
 .stats { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 13px; color: var(--muted); }
 .stats b { color: var(--text); font-weight: 600; margin-right: 4px; }
 .stats .hot b { color: var(--waiting); }
@@ -145,3 +146,12 @@ button, input { font: inherit; }
 .checklist li.done { color: var(--muted); }
 .checklist li.done .mark { color: var(--done); }
 .checklist li.doing .mark { color: var(--running); }
+
+/* Card motion: moves are played by app.js; a changed or new card gets a soft ring that fades once it has landed. */
+.flip-layer { position: fixed; inset: 0; z-index: 2; pointer-events: none; }
+.flip-layer .card, .card.dragging { box-shadow: 0 14px 32px rgba(16, 24, 40, .22); }
+.card.flash { animation: flash 2.4s ease-out; }
+@keyframes flash {
+  0%, 35% { outline: 2px solid color-mix(in srgb, var(--c) 70%, transparent); outline-offset: 1px; }
+  100% { outline: 2px solid transparent; outline-offset: 4px; }
+}
