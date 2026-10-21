@@ -13,7 +13,7 @@ akb() { python3 -c 'import json,sys; k,s,t,m=sys.argv[1:5]; print(json.dumps({"k
   | curl -fsS -m 10 -X POST "$AKB_URL/api/events" -H "Authorization: Bearer $AKB_SOURCE_KEY" -H 'content-type: application/json' --data-binary @- >/dev/null 2>&1 || true; }
 ```
 
-开工时（标题写清楚这次做什么）：
+**第一件事就是开工上报**：在读代码、装依赖、跑任何别的命令之前，在同一条命令里定义上面的函数并跑下面两行（标题写清楚这次做什么）。用户在看板上等这张卡出现，不要拖到最后和完工一起报：
 
 ```bash
 echo "codex-cloud:$(date +%Y%m%d%H%M%S)-$RANDOM" > /tmp/akb-key
