@@ -40,7 +40,7 @@ export function claudeCodeEvents(payload, env = process.env) {
     case "UserPromptSubmit": {
       // The person's own words name the card; a coordinator's note only until those arrive.
       const { text, human } = promptParts(payload.prompt);
-      events.push({ ...base, status: "running", title: oneLine(text, 100) || undefined, title_mode: human ? "first" : "default", message: `Prompt: ${oneLine(text || payload.prompt, 400)}`, type: "prompt" });
+      events.push({ ...base, status: "running", title: oneLine(text, 100) || undefined, title_mode: human ? "first" : "default", ...promptLine(text || payload.prompt, human) });
       break;
     }
     case "PreToolUse":
@@ -117,6 +117,11 @@ export function claudeCodeEvents(payload, env = process.env) {
       break;
   }
   return { rootKey, events };
+}
+
+// A note relayed by a coordinator or another thread is not the person speaking: the board shows it apart.
+function promptLine(text, human) {
+  return human ? { message: `Prompt: ${oneLine(text, 400)}`, type: "prompt" } : { message: `转来: ${oneLine(text, 400)}`, type: "relay" };
 }
 
 // The PR url when this tool call opened one: the GitHub MCP create_pull_request tool or `gh pr create`.

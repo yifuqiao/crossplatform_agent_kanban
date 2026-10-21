@@ -1,3 +1,5 @@
+import { condenseTimeline } from "./timeline.js";
+
 const SOURCE_COLORS = {
   "claude-code": "#d97757", "claude-code-web": "#b8613f", "claude-chat": "#c96442", codex: "#10a37f", chatgpt: "#0f8f6f",
   cursor: "#3b3b3b", "cursor-cli": "#555", "cursor-cloud": "#6b5bd6", "grok-bot": "#5b6b82", "grok-chat": "#8391a7",
@@ -5,6 +7,8 @@ const SOURCE_COLORS = {
 const STATUS_LABEL = { queued: "排队", planning: "规划中", running: "进行中", waiting: "等您", review: "审核中", done: "完成", failed: "失败" };
 // Finished columns show the newest few; the rest stay one click away.
 const FINISHED_LIMIT = 8;
+// Hook prompt lines start with this; the timeline and cards show the words alone.
+const PROMPT_PREFIX = /^(Prompt|转来): /;
 
 const params = new URLSearchParams(location.search);
 let token = params.get("token");
@@ -22,7 +26,7 @@ const withToken = (u) => (token ? `${u}${u.includes("?") ? "&" : "?"}token=${enc
 const inWxWork = /wxwork/i.test(navigator.userAgent || "");
 
 // expanded: "col|group" day groups whose finished-card limit was lifted. toggled: "col|group" groups whose fold differs from the default (今天 open, 昨天/历史 folded).
-const state = { tasks: new Map(), columns: [], hidden: new Set(), query: "", flat: false, showStale: false, open: null, expanded: new Set(), toggled: new Set() };
+const state = { tasks: new Map(), columns: [], hidden: new Set(), query: "", flat: false, showStale: false, open: null, expanded: new Set(), toggled: new Set(), openSteps: new Set() };
 const STALE_MS = 24 * 3600 * 1000;
 // A running/planning card with no event for this long is flagged on the board (still shown).
 const SILENT_MS = 30 * 60 * 1000;
@@ -203,7 +207,9 @@ function card(t, { showParent = false, hideTree = false } = {}) {
   const counts = {};
   for (const d of desc) counts[d.status] = (counts[d.status] || 0) + 1;
   const attention = t.status !== "waiting" && desc.some((d) => d.status === "waiting");
-  const last = t.events?.findLast((e) => e.type !== "update_request" && e.type !== "choice" && e.type !== "choice_clear" && e.type !== "checklist")?.message;
+  // The newest line that says something: the person's prompt, a PR, a bot's report. Not a tool call.
+  const last = condenseTimeline(t.events).findLast((r) => r.kind !== "summary" && r.event.message
+    && !["update_request", "choice", "choice_clear"].includes(r.event.type))?.event.message.replace(PROMPT_PREFIX, "");
   const same = (a, b) => a.slice(0, 60) === b.slice(0, 60);
   const parent = (showParent || state.flat) && t.parentKey ? state.tasks.get(t.parentKey) : null;
   const stale = staleReason(t);
@@ -228,7 +234,7 @@ function card(t, { showParent = false, hideTree = false } = {}) {
     parent && el("div", { class: "parent-line" }, `↳ ${displayTitle(parent)}`),
     el("div", { class: "title" }, displayTitle(t)),
     t.summary && el("div", { class: "summary" }, t.summary),
-    last && !t.checklist?.length && !(t.summary && same(last, t.summary)) && el("div", { class: "last", title: last }, last),
+    last && !t.checklist?.length && !(t.summary && same(last, t.summary)) && !same(last, displayTitle(t)) && el("div", { class: "last", title: last }, last),
     flags.length > 0 && el("div", { class: "flags" }, flags),
     checklistBlock(t),
     choiceBlock(t, { compact: true }),
@@ -380,10 +386,7 @@ function renderDetail() {
     el("div", { class: "meta" }, meta.flatMap(([k, v]) => [el("span", {}, k), el("span", {}, v)])),
     childrenOf(t.key).length > 0 && el("section", {}, el("h4", {}, "子任务"), tree(t.key)),
     el("section", {}, el("h4", {}, "时间线"),
-      el("ul", { class: "timeline" }, [...(t.events || [])].reverse().map((e) =>
-        el("li", {}, el("span", { class: "sdot", style: `--c:var(--${e.status || "queued"})`, title: STATUS_LABEL[e.status] || "" }),
-          el("time", { title: new Date(e.at).toLocaleString() }, new Date(e.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })),
-          el("span", {}, e.message || STATUS_LABEL[e.status] || ""))))),
+      el("ul", { class: "timeline" }, condenseTimeline(t.events).reverse().flatMap(timelineRow))),
     el("div", { class: "actions" },
       updateControl(t),
       closeControl(t),
@@ -392,6 +395,33 @@ function renderDetail() {
         await api(`api/tasks/${encodeURIComponent(t.key)}`, { method: "DELETE" });
       } }, "从看板移除")),
   ].filter((n) => n instanceof Node));
+}
+
+const clock = (at) => new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+function timelineLine(e, cls, text) {
+  return el("li", { class: cls }, el("span", { class: "sdot", style: `--c:var(--${e.status || "queued"})`, title: STATUS_LABEL[e.status] || "" }),
+    el("time", { title: new Date(e.at).toLocaleString() }, clock(e.at)),
+    el("span", {}, text));
+}
+
+// One condensed row (see public/timeline.js). The person's prompts stand out; the agent's steps
+// between two prompts are one summary line that opens to the individual steps.
+function timelineRow(r) {
+  if (r.kind === "prompt") return timelineLine(r.event, "prompt", r.event.message.replace(PROMPT_PREFIX, ""));
+  if (r.kind === "relay") return timelineLine(r.event, "relay", [el("b", {}, "转来 "), r.event.message.replace(PROMPT_PREFIX, "")]);
+  if (r.kind === "event") return timelineLine(r.event, "", r.event.message || STATUS_LABEL[r.event.status] || "");
+  const id = r.events[0].id;
+  const open = state.openSteps.has(id);
+  const steps = r.events.filter((e) => e.message);
+  const span = clock(r.at) === clock(r.until) ? "" : `–${clock(r.until)}`;
+  const head = el("li", { class: `steps${open ? " open" : ""}`, title: open ? "收起" : "展开每一步",
+    onclick: () => { open ? state.openSteps.delete(id) : state.openSteps.add(id); renderDetail(); } },
+    el("span", { class: "sdot", style: `--c:var(--${r.status || "queued"})` }),
+    el("time", { title: `${new Date(r.at).toLocaleString()}${span}` }, clock(r.until)),
+    el("span", {}, el("span", { class: "tl-who" }, "Agent"), r.text, el("span", { class: "tl-more" }, open ? " 收起" : ` · ${steps.length} 步${span ? ` · ${clock(r.at)}${span}` : ""}`)));
+  if (!open) return [head];
+  return [head, ...steps.slice().reverse().map((e) => timelineLine(e, "step", e.message))];
 }
 
 // Grok Bot sometimes never closes a relay task. Let the user close the card; the relay is not touched.

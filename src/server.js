@@ -33,7 +33,7 @@ import {
 } from "./session.js";
 
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "public");
-const STATIC = { "/": "index.html", "/app.js": "app.js", "/style.css": "style.css" };
+const STATIC = { "/": "index.html", "/app.js": "app.js", "/timeline.js": "timeline.js", "/style.css": "style.css" };
 const TYPES = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8" };
 const MAX_BODY = 1024 * 1024;
 
