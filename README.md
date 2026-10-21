@@ -103,6 +103,8 @@ Codex 只运行你信任过的 hook：第一次在 Codex 里打开 `/hooks`，�
 hook 的 `session_id` 就是 Codex 的 thread id，和旧的 `notify` 是同一张卡。没有 hooks 的旧版 Codex 只能用 `notify = ["akb", "hook", "codex"]`，它只在每轮结束时触发（卡进审核中，带最后回复）；不要和 hooks 同时开。
 想看到整次运行的开始和退出码，仍然可以用包装器启动：`akb run --title "重构 auth" -- codex`，hook 会写进包装器那张卡（通过 `AKB_TASK_KEY`）。
 
+Windows 上的 Codex 会在 hook 退出时结束它的子进程，所以 `akb hook codex` 在 Windows 上直接发送（最多 3.5 秒，Codex 的上限是 5 秒），不交给后台进程；别的系统想这样也可以设 `AKB_HOOK_SYNC=1`。
+
 `AKB_CODEX_SOURCE` 可以给卡片换来源名（例如在别的机器上用 `codex-cloud`），钥匙要和来源对应。
 
 ### Codex cloud（chatgpt.com/codex）
@@ -112,7 +114,7 @@ hook 的 `session_id` 就是 Codex 的 thread id，和旧的 `notify` 是同一�
 1. 管理员生成一把 `codex-cloud` 来源钥匙（`akb token-new --source codex-cloud`），私下交给你。
 2. Codex 的环境设置里：**环境变量**（不是 Secrets：Secrets 在 agent 开始前就被移除了）加 `AKB_URL=https://<看板地址>` 和 `AKB_SOURCE_KEY=<这把钥匙>`；
    打开 agent 的联网，允许的域名里加看板的域名。
-3. 把 [`examples/codex-cloud-AGENTS.md`](examples/codex-cloud-AGENTS.md) 的那一节贴进仓库的 `AGENTS.md`。
+3. 把 [`examples/codex-cloud-AGENTS.md`](examples/codex-cloud-AGENTS.md) 的那一节贴进仓库的 `AGENTS.md`。本仓库的 [`AGENTS.md`](AGENTS.md) 已经带上这一节。
 
 agent 开工时开卡（进行中），做完改审核中或失败。这是约定而不是 hook：agent 忘了就不会上报。钥匙在环境变量里，agent 能读到，所以只给它一把只能写 `codex-cloud` 卡的来源钥匙，不要放 `AKB_TOKEN`。
 

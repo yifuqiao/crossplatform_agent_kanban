@@ -104,11 +104,19 @@ async function cmdHook(f) {
     const { rootKey, events } = adapter(payload);
     // Stamp now: the board orders statuses by this, since background sends can arrive out of order.
     const at = new Date().toISOString();
-    if (events.length) sendInBackground(applyEnvLinks(events, rootKey).map((ev) => ({ at, ...ev })));
+    const out = applyEnvLinks(events, rootKey).map((ev) => ({ at, ...ev }));
+    // Codex on Windows ends a hook's child processes when the hook exits, so a detached send never
+    // happens there: send inline, well inside Codex's hook timeout. AKB_HOOK_SYNC=1 forces this anywhere.
+    if (events.length && syncHook(which)) await post("/api/events", out, 3500).catch(() => {});
+    else if (events.length) sendInBackground(out);
   } catch (err) {
     if (process.env.AKB_DEBUG) console.error(`[akb] hook ${which}: ${err.message}`);
   }
   if (which === "cursor") process.stdout.write(JSON.stringify(cursorHookResponse(payload)));
+}
+
+function syncHook(which) {
+  return process.env.AKB_HOOK_SYNC === "1" || (which === "codex" && process.platform === "win32");
 }
 
 // Hand the events to a detached `akb send` so the agent never waits on the network
