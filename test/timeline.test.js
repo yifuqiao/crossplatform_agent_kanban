@@ -26,6 +26,8 @@ test("an older hook's one line per tool call folds into one summary between prom
     ["prompt", "Prompt: 好"],
   ]);
   assert.equal(rows[1].events.length, 7);
+  // Bookkeeping (no_reply_needed) and the turn end are folded away, not counted or listed as steps.
+  assert.deepEqual(rows[1].steps.map((e) => e.message), ["mcp__hearthbot__read_memory", "Bash · ssh grok-relay", "Bash · curl /kanban/health", "mcp__hearthbot__edit_message", "mcp__hearthbot__post_message"]);
 });
 
 test("a PR, a waiting question, relayed notes and bot reports keep their own rows", () => {
@@ -37,6 +39,7 @@ test("a PR, a waiting question, relayed notes and bot reports keep their own row
     ev("checklist", "进度 3/3"),
     ev("notification", "Claude needs your permission", "waiting"),
     ev("progress", "CI green", "running"),
+    ev("stop", "Agent stopped (error)", "failed"),
   ]);
   assert.deepEqual(rows.map((r) => [r.kind, r.text || r.event.message]), [
     ["relay", "转来: Clean up the review lane"],
@@ -45,5 +48,6 @@ test("a PR, a waiting question, relayed notes and bot reports keep their own row
     ["summary", "进度 3/3"],
     ["event", "Claude needs your permission"],
     ["event", "CI green"],
+    ["event", "Agent stopped (error)"],
   ]);
 });

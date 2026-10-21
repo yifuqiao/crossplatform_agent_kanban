@@ -413,7 +413,7 @@ function timelineRow(r) {
   if (r.kind === "event") return timelineLine(r.event, "", r.event.message || STATUS_LABEL[r.event.status] || "");
   const id = r.events[0].id;
   const open = state.openSteps.has(id);
-  const steps = r.events.filter((e) => e.message);
+  const steps = r.steps;
   const span = clock(r.at) === clock(r.until) ? "" : `–${clock(r.until)}`;
   const head = el("li", { class: `steps${open ? " open" : ""}`, title: open ? "收起" : "展开每一步",
     onclick: () => { open ? state.openSteps.delete(id) : state.openSteps.add(id); renderDetail(); } },

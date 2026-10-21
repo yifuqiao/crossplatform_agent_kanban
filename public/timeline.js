@@ -39,7 +39,8 @@ export function actionKind(e) {
 // Lines that keep a row of their own even between prompts: a PR, a resolved thread, a choice, a
 // question for the person, a bot's progress report, a card's end.
 function isRoutine(e) {
-  if (e.type === "notification" && e.status === "waiting") return false;
+  // A stop or notification that fails the run or asks for the person is news, not routine.
+  if ((e.type === "notification" || e.type === "stop") && (e.status === "waiting" || e.status === "failed")) return false;
   if (e.type === "session" && (e.status === "done" || e.status === "failed")) return false;
   if (ROUTINE.has(e.type)) return true;
   // A bare status flip with no words (e.g. "running" from a tool call) says nothing new.
@@ -50,7 +51,8 @@ function isRoutine(e) {
 //   { kind: "prompt", event }               the person's own words
 //   { kind: "relay", event }                a coordinator's / another thread's note
 //   { kind: "event", event }                a line worth its own row
-//   { kind: "summary", events, text, at, until, status }   folded agent actions
+//   { kind: "summary", events, steps, text, at, until, status }   folded agent actions; steps are
+//     the events that count (no bookkeeping calls, turn ends or resumes)
 export function condenseTimeline(events) {
   const rows = [];
   let run = [];
@@ -58,16 +60,18 @@ export function condenseTimeline(events) {
     if (!run.length) return;
     const counts = new Map();
     let progress = null;
+    const steps = [];
     for (const e of run) {
       const k = actionKind(e);
       if (k) counts.set(k, (counts.get(k) || 0) + 1);
       if (e.type === "checklist" && e.message) progress = e.message;
+      if (k || (e.type === "checklist" && e.message)) steps.push(e);
     }
     const parts = [...counts].sort((a, b) => b[1] - a[1]).map(([k, n]) => (n > 1 ? `${k} ${n}` : k));
     if (progress) parts.push(progress);
     const last = run[run.length - 1];
     if (parts.length) {
-      rows.push({ kind: "summary", events: run, text: parts.join(" · "), at: run[0].at, until: last.at, status: run.findLast((e) => e.status)?.status || null });
+      rows.push({ kind: "summary", events: run, steps, text: parts.join(" · "), at: run[0].at, until: last.at, status: run.findLast((e) => e.status)?.status || null });
     }
     run = [];
   };
