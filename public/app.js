@@ -21,7 +21,8 @@ if (params.has("token")) {
 const withToken = (u) => (token ? `${u}${u.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}` : u);
 const inWxWork = /wxwork/i.test(navigator.userAgent || "");
 
-const state = { tasks: new Map(), columns: [], hidden: new Set(), query: "", flat: false, showStale: false, open: null, expanded: new Set() };
+// expanded: "col|group" day groups whose finished-card limit was lifted. toggled: "col|group" groups whose fold differs from the default (今天 open, 昨天/历史 folded).
+const state = { tasks: new Map(), columns: [], hidden: new Set(), query: "", flat: false, showStale: false, open: null, expanded: new Set(), toggled: new Set() };
 const STALE_MS = 24 * 3600 * 1000;
 // A running/planning card with no event for this long is flagged on the board (still shown).
 const SILENT_MS = 30 * 60 * 1000;
@@ -48,6 +49,11 @@ function ago(iso) {
   if (s < 3600) return `${Math.floor(s / 60)} 分钟`;
   if (s < 86400) return `${Math.floor(s / 3600)} 小时`;
   return `${Math.floor(s / 86400)} 天`;
+}
+// Day key in the viewer's local time zone (YYYY-MM-DD), so "today" matches the clock the person sees.
+function dayKey(at) {
+  const d = new Date(at);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 const since = (iso) => (Date.now() - Date.parse(iso) < 60000 ? "刚刚" : `${ago(iso)}前`);
 
@@ -255,13 +261,42 @@ function cardsForColumn(colId, rootVisible) {
   return out;
 }
 
+// Cards split by when they were last heard from (the time shown on the card): 今天, 昨天, 历史.
+// 今天 is open by default, 昨天 and 历史 are folded; a click flips one group. Finished columns still show
+// the newest few per open group, with the rest one click away.
+const DAY_GROUPS = [{ id: "today", label: "今天", open: true }, { id: "yesterday", label: "昨天" }, { id: "older", label: "历史" }];
+function dayGroups(colId, cards) {
+  const now = new Date();
+  const today = dayKey(now);
+  const yesterday = dayKey(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1));
+  const groupOf = (t) => {
+    const day = dayKey(lastHeard(t));
+    return day >= today ? "today" : day === yesterday ? "yesterday" : "older";
+  };
+  const finished = colId === "done" || colId === "failed";
+  return DAY_GROUPS.map((g) => {
+    const list = cards.filter((t) => groupOf(t) === g.id);
+    if (!list.length) return null;
+    const id = `${colId}|${g.id}`;
+    const open = Boolean(g.open) !== state.toggled.has(id);
+    const shown = finished && !state.expanded.has(id) ? list.slice(0, FINISHED_LIMIT) : list;
+    return el("div", { class: `day${open ? " open" : ""}` },
+      el("button", { class: "day-head", "aria-expanded": String(open), title: open ? "点击折叠" : "点击展开",
+        onclick: () => { state.toggled.has(id) ? state.toggled.delete(id) : state.toggled.add(id); render(); } },
+        el("span", { class: "caret" }, open ? "▾" : "▸"), g.label, el("span", { class: "n" }, list.length)),
+      open && shown.map((t) => card(t)),
+      open && list.length > shown.length && el("button", { class: "more", onclick: () => { state.expanded.add(id); render(); } }, `再显示 ${list.length - shown.length} 张`));
+  });
+}
+
 function render() {
   renderSources();
   const candidates = [...state.tasks.values()].filter((t) => (state.flat || isRoot(t)) && matches(t));
   const staleCount = candidates.filter(staleReason).length;
   $("stale-count").textContent = staleCount;
   const visible = state.showStale ? candidates : candidates.filter((t) => !staleReason(t));
-  visible.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  const heard = new Map(visible.map((t) => [t.key, lastHeard(t)]));
+  visible.sort((a, b) => heard.get(b.key).localeCompare(heard.get(a.key)));
 
   const waiting = cardsForColumn("waiting", visible);
   $("attention").hidden = waiting.length === 0;
@@ -274,12 +309,9 @@ function render() {
     const cards = cardsForColumn(col.id, visible);
     byStatus[col.id] = cards.length;
     const label = STATUS_LABEL[col.id] || col.label;
-    const finished = col.id === "done" || col.id === "failed";
-    const shown = finished && !state.expanded.has(col.id) ? cards.slice(0, FINISHED_LIMIT) : cards;
     return el("section", { class: `column${cards.length ? "" : " empty"}`, style: `--c:var(--${col.id})`, title: cards.length ? null : `${label}：暂无` },
       el("h2", {}, el("span", { class: "dot" }), label, el("span", { class: "n" }, cards.length)),
-      shown.map((t) => card(t)),
-      cards.length > shown.length && el("button", { class: "more", onclick: () => { state.expanded.add(col.id); render(); } }, `再显示 ${cards.length - shown.length} 张`));
+      dayGroups(col.id, cards));
   }));
 
   const stat = (n, label, hot) => n > 0 && el("span", { class: hot ? "hot" : null }, el("b", {}, n), label);

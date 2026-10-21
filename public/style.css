@@ -46,6 +46,12 @@ button, input { font: inherit; }
 .column.empty { flex: 0 0 40px; min-width: 40px; padding: 10px 0; }
 .column.empty h2 { writing-mode: vertical-rl; margin: 0 auto; color: var(--muted); font-weight: 500; }
 .more { width: 100%; margin-top: 2px; border: 1px dashed var(--line); background: none; color: var(--muted); border-radius: 8px; padding: 6px; cursor: pointer; font-size: 12px; }
+.day { margin-bottom: 4px; }
+.day-head { display: flex; align-items: center; gap: 6px; width: 100%; border: 0; background: none; color: var(--muted); font-size: 12px; padding: 4px 4px; margin-bottom: 4px; border-radius: 6px; cursor: pointer; text-align: left; }
+.day-head:hover { background: color-mix(in srgb, var(--text) 6%, transparent); color: var(--text); }
+.day-head .caret { width: 1em; font-size: 14px; line-height: 1; color: var(--faint); }
+.day-head .n { margin-left: auto; color: var(--faint); }
+.day.open .day-head { color: var(--text); font-weight: 600; }
 .more:hover { color: var(--text); border-color: var(--muted); }
 
 .card { position: relative; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px 10px 14px; margin-bottom: 8px; cursor: pointer; box-shadow: var(--shadow); overflow: hidden; }
