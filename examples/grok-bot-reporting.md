@@ -1,85 +1,42 @@
-# Grok Bot: report wrapped activity to the agent kanban
+# Grok Bot：让看板看清你的任务状态
 
-Give these instructions to Grok Bot (and to any bot it forwards work to) so the board can show
-what happens *inside* a relay task. Without them the board still works: it polls the relay and
-infers hand-offs (`forwarded` + bot id) and Cursor cloud agents (`bc-…` ids) from progress
-summaries. With them, every inner step gets its own card, status and links.
+看板自己轮询 relay（`GET /tasks`、`GET /tasks/<id>`），从你写进 relay 的进展里读状态。
+**你不需要往看板发任何东西，也不需要接 MCP**；每个任务多花的 token 为零。
+看板只能看到你写进 relay 的那几条进展，所以状态词要写对。把下面这段加进分拣 bot 和执行 bot（例如大总管）的提示词。
 
-## Where the board is
+## 提示词（直接贴）
 
-- `AKB_URL`, for example `https://kanban.example.com` (must be reachable from where Grok Bot runs)
-- A `grok-bot` source key, sent as `Authorization: Bearer <key>`. The board admin makes one with
-  `akb token-new --source grok-bot` (add `--agent <bot>` to bind it to one bot) and hands it over
-  privately. Keep it out of task text and chat. Do not give Grok Bot the admin `AKB_TOKEN`.
-  The key can only write `grok-bot:*` cards and only nest them under `grok-bot:*` cards. A key bound
-  to a bot writes only cards carrying that bot's name; it can nest under the relay task's card but
-  not change it, so use an unbound key if the bot should also close the relay task's own card.
+```text
+每个 relay 任务的进展都会显示在看板上，看板只看 relay 里的状态词，不看你在聊天里说了什么。按下面写：
 
-## The task's own card
-
-Every relay task is already on the board as `grok-bot:<relay_task_id>`. Do not create another
-card for it; nest your inner activities under it with `parent`.
-
-## Report an inner activity
-
-```http
-POST {AKB_URL}/api/events
-Authorization: Bearer <grok-bot key>
-Content-Type: application/json
-
-{
-  "key": "grok-bot:<relay_task_id>/review",
-  "parent": "grok-bot:<relay_task_id>",
-  "kind": "bot",
-  "title": "代码二审 PR#23",
-  "status": "waiting",
-  "message": "等待二审 allow",
-  "event_id": "<stable id, so retries are not duplicated>"
-}
+1. 开工写 executing，一句话说在做什么。
+2. 在等人的时候写 waiting_approval，并在 summary 里写清等谁、等什么，例如「等乔总对来源钥匙点头」「等提供 FTP 凭据」。
+   等代码二审 bot 时可以继续写 executing，但 summary 里写「待二审 allow」。
+3. 任务结束时必须再发一条 finished 或 failed，summary 写结果；有 PR 写 PR 链接，部署了写部署的 commit。
+   这一条不能省：包括「做完了」「决定不做了」「被新任务取代了」「换成别的任务继续」，都要收尾。
+   被取代时写 failed，summary 写「被 <新任务 id 前 8 位> 取代」。
+4. 重新提交同一件事时，新任务标题写「（取代 <旧任务 id 前 8 位>）」。
+5. 不要为了让看板显示而额外发心跳或重复进展；没变化就不用写。
 ```
 
-- `key` is `source:id` and must be stable for the activity, so later calls update the same card.
-- `status` is one of `queued`, `running`, `waiting` (needs a human), `review`, `done`, `failed`.
-  Native words such as `executing`, `waiting_approval`, `finished` are accepted too.
-- `parent` can point at any card, so activities can nest several levels deep
-  (task → bot hand-off → Cursor cloud agent).
-- Optional: `summary`, `url`, `links: [{"url": "...", "label": "PR"}]`, `meta: {...}`.
-- A list of events can be sent in one request as a JSON array.
+## 看板会怎么显示
 
-## Keep running cards fresh
-
-The board flags a running card as **Silent** after 30 minutes without an event, because a card
-that says "running" but has gone quiet is the main reason the board stops being trusted.
-While a task or inner activity is running, send an event at least every 15 minutes, even if it
-only says what step you are on. Always send the final `done` or `failed`; never leave a card
-running after the work stopped.
+| 你在 relay 里写的 | 看板上 |
+| --- | --- |
+| `received` | 排队 |
+| `forwarded`，summary 带 bot 名和 id | 进行中，卡片 Agent 显示那个 bot |
+| `executing` | 进行中 |
+| `executing`，summary 含「待二审 / 等…allow」 | 进行中，标「等代码二审」 |
+| `waiting_approval`，或 summary 含「等乔总 / 点头 / 待提供 / 等…授权、确认、凭据」 | 等您 |
+| 24 小时没有新进展 | 等您：请用户判断是不是已经做完 |
+| `finished` / `failed` | 完成 / 失败 |
 
 ## Cursor cloud agents
 
-A `grok-bot` key cannot write `cursor-cloud:*` cards. Mention the `bc-…` id in the relay progress
-summary instead: the board nests the agent under the relay task and its Cursor poller keeps the
-status current. With the admin `AKB_TOKEN` you can also report it directly with the Cursor agent
-id so the poller merges into the same card:
+在进展里提到 `bc-…` agent id 就行：看板把它挂在任务下面，Cursor 轮询器自己查它的状态和 PR。
 
-```json
-{ "key": "cursor-cloud:bc-xxxxxxxx", "parent": "grok-bot:<relay_task_id>", "status": "running",
-  "title": "Fix DRAWING_STORE fail-closed", "url": "https://cursor.com/agents?id=bc-xxxxxxxx" }
-```
+## 可选：更细的内部步骤
 
-Either way, mention the `bc-…` id in the relay progress summary; the board picks it up from there too.
-
-## CLI agents you start
-
-When you start Claude Code, Codex or Cursor CLI on a machine that has `akb` hooks installed, set
-`AKB_PARENT_KEY=grok-bot:<relay_task_id>` in its environment (or launch it through
-`akb run --parent grok-bot:<relay_task_id> -- <command>`). Its session then appears nested under
-the relay task with live progress from its own hooks.
-
-## Get update requests
-
-The user can press **Get update** on a card. The board only marks the card; it does not message
-Grok Bot or the relay. Every `kanban_report` result carries `update_requests` (cards of your
-source waiting for a brief), and `kanban_update_requests` lists them on demand. Answer each one
-with `kanban_report` on its `task_key` with a `summary`: the latest state in a few lines
-(progress numbers, blockers, next step). Over HTTP, send the same as an event with
-`"summary": "...", "brief": true`.
+只有确实需要把内部步骤拆成子卡时，才用 grok-bot 来源钥匙往 `POST {AKB_URL}/api/events` 上报，
+`key` 用 `grok-bot:<relay_task_id>/<步骤>`，`parent` 用 `grok-bot:<relay_task_id>`。默认不做，因为每次上报都花 token。
+钥匙由看板管理员用 `akb token-new --source grok-bot` 生成后私下交付，不能出现在任务文本或聊天里。

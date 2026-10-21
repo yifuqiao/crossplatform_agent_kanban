@@ -34,10 +34,8 @@ test("relay snapshot becomes a card with timeline and wrapped activities", () =>
   assert.ok(root.events.some((e) => e.status === "waiting"));
   assert.ok(root.links.some((l) => l.url === "https://github.com/acme/portal/pull/23" && l.label === "PR"));
 
-  const kids = s.children(root.key);
-  const handoff = kids.find((k) => k.title.startsWith("Handed to"));
-  assert.equal(handoff.title, "Handed to 日川驾驶舱大总管");
-  assert.equal(handoff.status, "running");
+  assert.equal(root.agentName, "日川驾驶舱大总管");
+  assert.ok(!s.children(root.key).some((k) => k.title.startsWith("Handed to")), "hand-offs are a label, not cards");
   const cursor = s.get("cursor-cloud:bc-7f3a9e21-aaaa-4bbb");
   assert.equal(cursor.parentKey, root.key);
   assert.equal(cursor.kind, "cloud");
@@ -75,7 +73,7 @@ test("poller only refetches tasks whose status or updatedAt changed", async () =
     const body = url.endsWith("/tasks?limit=50") ? { tasks: [listed] } : detail;
     return { ok: true, status: 200, json: async () => body };
   };
-  const poller = createGrokRelayPoller({ store: s, baseUrl: "https://relay.example.com/", keys: ["k1"], fetchImpl });
+  const poller = createGrokRelayPoller({ store: s, baseUrl: "https://relay.example.com/", keys: ["k1"], fetchImpl, now: () => Date.parse(detail.updatedAt) + 60000 });
   await poller.poll();
   await poller.poll();
   assert.equal(calls.filter((u) => u.includes(`/tasks/${ID}`)).length, 1);
@@ -215,4 +213,110 @@ test("two restarts with polls on the live state.json shape keep every card and k
   const saved = JSON.parse(fs.readFileSync(path.join(dir, "state.json"), "utf8"));
   assert.equal(saved.tasks.length, keys.length);
   assert.deepEqual(saved.tasks.map((t) => t.key).sort(), keys);
+});
+
+// --- inferred waits, quiet tasks, retries, titles (2026-10-21) ---
+
+const at = (min) => new Date(Date.parse("2026-10-20T09:00:00.000Z") + min * 60000).toISOString();
+const executing = (summary, extra = {}) => ({
+  relayTaskId: "b282293b-2c10-4fda-8e93-df2c0b0f6ea3", status: "executing", source: "claude", sourceThread: null, kind: "task",
+  createdAt: at(0), updatedAt: at(5), completion: null, summary,
+  updates: [
+    { event_id: "s1", status: "forwarded", summary: "已转日川驾驶舱大总管（1a698906）执行", at: at(1) },
+    { event_id: "p1", status: "executing", summary, at: at(5) },
+  ],
+  ...extra,
+});
+
+test("a task waiting on the code-review bot stays running with a 等代码二审 note", () => {
+  const s = new Store();
+  for (const ev of grokTaskEvents(executing("B 完成 7/7；A 待二审 allow"), { listed: { title: "更新 kanban" } })) s.apply(ev);
+  const t = s.get("grok-bot:b282293b-2c10-4fda-8e93-df2c0b0f6ea3");
+  assert.equal(t.status, "running");
+  assert.equal(t.meta.waiting_on, "代码二审");
+  assert.equal(t.agentName, "日川驾驶舱大总管", "a short bracketed bot id still names the bot");
+  assert.equal(s.children(t.key).length, 0);
+});
+
+test("a task waiting on the user goes to 等您, and leaves it when work resumes", () => {
+  const s = new Store();
+  const key = "grok-bot:b282293b-2c10-4fda-8e93-df2c0b0f6ea3";
+  for (const ev of grokTaskEvents(executing("部署前等乔总对来源钥匙点头"), { listed: { title: "t" } })) s.apply(ev);
+  assert.equal(s.get(key).status, "waiting");
+  assert.equal(s.get(key).meta.waiting_on, "您");
+
+  const resumed = executing("开始部署");
+  resumed.updates = [...executing("部署前等乔总对来源钥匙点头").updates, { event_id: "p2", status: "executing", summary: "开始部署", at: at(30) }];
+  resumed.updatedAt = at(30);
+  for (const ev of grokTaskEvents(resumed, { listed: { title: "t" } })) s.apply(ev);
+  assert.equal(s.get(key).status, "running");
+  assert.equal(s.get(key).meta.waiting_on, null);
+});
+
+test("a pending relay approval means 等您", async () => {
+  const { inferWait } = await import("../src/pollers/grok-relay.js");
+  assert.deepEqual(inferWait({ approval: { status: "pending" } }, []), { status: "waiting", waitingOn: "审批" });
+  assert.equal(inferWait({ approval: { status: "approved" } }, []), null);
+  assert.equal(inferWait({ summary: "二审要改：Cloud 修 fail-closed" }, []), null);
+});
+
+test("an open relay task quiet for 24 hours moves to 等您 once; a newer relay update takes it back", async () => {
+  const s = new Store();
+  let detailNow = executing("核对中");
+  let listedNow = { relayTaskId: detailNow.relayTaskId, title: "更新 kanban", status: "executing", updatedAt: detailNow.updatedAt };
+  const fetchImpl = async (url) => ({ ok: true, status: 200, json: async () => (url.includes("/tasks?") ? { tasks: [listedNow] } : detailNow) });
+  let clock = Date.parse(at(60));
+  const poller = createGrokRelayPoller({ store: s, baseUrl: "https://relay.example.com", keys: ["k1"], fetchImpl, now: () => clock });
+  const key = `grok-bot:${detailNow.relayTaskId}`;
+
+  await poller.poll();
+  assert.equal(s.get(key).status, "running");
+
+  clock = Date.parse(at(5)) + 25 * 3600 * 1000;
+  await poller.poll();
+  await poller.poll();
+  assert.equal(s.get(key).status, "waiting");
+  assert.equal(s.get(key).meta.quiet_since, at(5));
+  assert.equal(s.get(key).events.filter((e) => e.type === "quiet").length, 1);
+
+  detailNow = { ...executing("又开始了"), updatedAt: at(26 * 60) };
+  detailNow.updates = [...detailNow.updates, { event_id: "p9", status: "executing", summary: "又开始了", at: at(26 * 60) }];
+  listedNow = { ...listedNow, updatedAt: at(26 * 60) };
+  clock = Date.parse(at(26 * 60)) + 60000;
+  await poller.poll();
+  assert.equal(s.get(key).status, "running");
+});
+
+test("dry runs stay off the board", async () => {
+  const s = new Store();
+  const ping = { relayTaskId: "ac4bb7eb-7bd9-4233-a6e6-36113f5ba3df", title: "relay-ping", status: "dry_run", updatedAt: at(0) };
+  const fetchImpl = async () => ({ ok: true, status: 200, json: async () => ({ tasks: [ping] }) });
+  await createGrokRelayPoller({ store: s, baseUrl: "https://relay.example.com", keys: ["k1"], fetchImpl }).poll();
+  assert.equal(s.list().length, 0);
+});
+
+test("a failed task retried with the same PR title is folded into the retry", async () => {
+  const { supersededEvents } = await import("../src/pollers/grok-relay.js");
+  const tasks = [
+    { relayTaskId: "c629197f-bd0f-4985-a567-0eca4e8b9eda", title: "二审并部署 Agent Kanban PR #6 新 head daf07ae 到 relay.onetopway.com/kanban", status: "finished", createdAt: at(20) },
+    { relayTaskId: "87597768-6ff8-4948-aada-64aa76f52424", title: "二审并部署 Agent Kanban PR #6（91210d3）到 relay.onetopway.com/kanban", status: "failed", createdAt: at(0) },
+    { relayTaskId: "11111111-0000-4000-8000-000000000000", title: "部署 supplier-management PR #6", status: "failed", createdAt: at(1) },
+  ];
+  const events = supersededEvents(tasks);
+  assert.equal(events.length, 1);
+  assert.equal(events[0].key, "grok-bot:87597768-6ff8-4948-aada-64aa76f52424");
+  assert.equal(events[0].meta.superseded_by, "grok-bot:c629197f-bd0f-4985-a567-0eca4e8b9eda");
+});
+
+test("a conversation card is named after its task, not its raw thread id", () => {
+  const s = new Store();
+  for (const ev of grokTaskEvents({ ...detail, sourceThread: "cmsg_01BTANmoK6wNuUQuMaY7ep6R6EWq9VsfaWXL6danotWJhJ" }, { listed })) s.apply(ev);
+  const parent = s.get("claude-chat:cmsg_01BTANmoK6wNuUQuMaY7ep6R6EWq9VsfaWXL6danotWJhJ");
+  assert.equal(parent.title, "claude-chat · 合并并上线 PR #23（图纸）");
+  assert.equal(parent.placeholder, true);
+
+  // A real card (e.g. a Claude Code session from hooks) keeps its own title.
+  s.apply({ key: "claude-code-web:session_01BPER2M4UidTDfYdHw8ji51", title: "Grok Bot 状态上报设计", status: "running" });
+  for (const ev of grokTaskEvents({ ...detail, sourceThread: "session_01BPER2M4UidTDfYdHw8ji51" }, { listed, existing: () => null })) s.apply(ev);
+  assert.equal(s.get("claude-code-web:session_01BPER2M4UidTDfYdHw8ji51").title, "Grok Bot 状态上报设计");
 });

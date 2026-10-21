@@ -25,6 +25,8 @@ const state = { tasks: new Map(), columns: [], hidden: new Set(), query: "", fla
 const STALE_MS = 24 * 3600 * 1000;
 // A running/planning card with no event for this long is flagged on the board (still shown).
 const SILENT_MS = 30 * 60 * 1000;
+// Grok Bot tasks often wait on CI or review between notes; flag them as lost contact only after 2 hours.
+const GROK_SILENT_MS = 2 * 3600 * 1000;
 const $ = (id) => document.getElementById(id);
 
 function el(tag, attrs = {}, ...kids) {
@@ -92,7 +94,9 @@ function lastHeard(t) {
 function silentReason(t) {
   if (t.status !== "planning" && t.status !== "running") return null;
   const last = lastHeard(t);
-  return Date.now() - Date.parse(last) > SILENT_MS ? `静默 ${ago(last)}` : null;
+  const grok = t.source === "grok-bot";
+  if (Date.now() - Date.parse(last) <= (grok ? GROK_SILENT_MS : SILENT_MS)) return null;
+  return grok ? `失联 ${ago(last)}` : `静默 ${ago(last)}`;
 }
 
 // Cards an agent opened itself through MCP move only when it remembers to report;
@@ -183,6 +187,7 @@ function card(t, { showParent = false, hideTree = false } = {}) {
     stale && el("span", { class: "flag" }, stale),
     silent && el("span", { class: "flag silent", title: "还标着进行中，但之后再没有任何上报。agent 可能已经停了却没说。" }, silent),
     attention && el("span", { class: "flag" }, "子任务等您"),
+    t.meta?.waiting_on && el("span", { class: "flag", title: "从 agent 最近的进展里推断" }, `等${t.meta.waiting_on}`),
     selfReported(t) && el("span", { class: "flag self", title: "只在 agent 通过 MCP 主动上报时更新，不走 hook 或轮询" }, "自报"),
     t.updateRequest && el("span", { class: "flag asked", title: "等 agent 写一段进展" }, "已请求更新"),
     t.choice && el("span", { class: "flag chosen" }, "已选"),
@@ -324,11 +329,33 @@ function renderDetail() {
           el("span", {}, e.message || STATUS_LABEL[e.status] || ""))))),
     el("div", { class: "actions" },
       updateControl(t),
+      closeControl(t),
       el("button", { class: "danger", onclick: async () => {
         if (!confirm("把这张卡和它的子任务从看板上移除？")) return;
         await api(`api/tasks/${encodeURIComponent(t.key)}`, { method: "DELETE" });
       } }, "从看板移除")),
   ].filter((n) => n instanceof Node));
+}
+
+// Grok Bot sometimes never closes a relay task. Let the user close the card; the relay is not touched.
+function closeControl(t) {
+  if (t.source !== "grok-bot" || t.status === "done" || t.status === "failed" || t.placeholder) return null;
+  const close = (status, ask) => async (e) => {
+    if (!confirm(ask)) return;
+    e.target.disabled = true;
+    try {
+      await api(`api/tasks/${encodeURIComponent(t.key)}/close`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ status }),
+      });
+    } catch (err) {
+      e.target.disabled = false;
+      alert(`没能关闭：${err.message}`);
+    }
+  };
+  return [
+    el("button", { class: "action", title: "只改看板上的卡，不通知 Grok Bot", onclick: close("done", "确认这件事已经做完了？只改看板上的卡。") }, "我确认已完成"),
+    el("button", { class: "action", title: "只改看板上的卡，不通知 Grok Bot", onclick: close("failed", "标记为已放弃？只改看板上的卡。") }, "已放弃"),
+  ];
 }
 
 // Get update only records the ask on the card; the agent sees it the next time it talks to the

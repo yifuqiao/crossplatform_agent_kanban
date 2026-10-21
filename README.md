@@ -125,14 +125,18 @@ relay 按调用方 key 隔离任务，所以每个提交任务的平台给一个
 每个 relay 任务变成 `grok-bot:<relayTaskId>` 一张卡：
 
 - **时间线**：relay 的每条 progress（received / forwarded / executing / waiting_approval …）和完成报告。
-- **状态**：`received`→Queued，`forwarded`/`executing`→Running，`waiting_approval`→Needs you，`finished`→Done，`failed`/`rejected`→Failed。
-- **包在里面的活动**，从 progress 里识别出来，作为子卡：
-  - `forwarded` 且带 bot id（如 `已转交日川驾驶舱大总管（1a69…）`）→ 子卡 “Handed to 日川驾驶舱大总管”，任务结束时一起关闭；
-  - 出现 Cursor agent id `bc-…` → 子卡 `cursor-cloud:bc-…`，如果同时开了 Cursor 轮询，状态和 PR 以 Cursor 为准；
-  - GitHub PR 链接 → 卡片链接；完成报告的 artifacts → 卡片链接。
-- 如果 relay 任务带 `source_thread`，它会挂在那个聊天的卡片下面（例如 `claude-chat:<thread>`）。
+- **状态**：`received`→排队，`forwarded`/`executing`→进行中，`waiting_approval`→等您，`finished`→完成，`failed`/`rejected`→失败。`dry_run`（如 `relay-ping`）不上板。
+- **从最近一条进展推断在等谁**（Grok 常把等待写成 `executing`）：
+  - 「待二审 / 等…allow」→ 仍是进行中，卡上标「等代码二审」；
+  - 「等乔总 / 等您 / 点头 / 待提供 / 等…授权、确认、凭据」或 relay 有未处理的 `approval` → 等您。
+- **24 小时没有新进展**的未关任务移到「等您」，请你判断；进行中但 2 小时没动静的 Grok 卡标「失联」。卡片详情里有「我确认已完成 / 已放弃」，只改看板上的卡，不写 relay；relay 之后有更新的进展仍以 relay 为准。
+- **重试合并**：标题带「取代 <id 前 8 位>」，或失败任务之后有同样「… PR #n」标题的新任务，旧任务折叠成「已被取代」。
+- **执行者**：`forwarded` 里的 bot（如 `已转交日川驾驶舱大总管（1a69…）`）写到卡片的 Agent 上（显示「grok-bot · 日川驾驶舱大总管」），不另开子卡。
+- **子卡只给有真实状态源的活动**：出现 Cursor agent id `bc-…` → 子卡 `cursor-cloud:bc-…`，如果同时开了 Cursor 轮询，状态和 PR 以 Cursor 为准。
+- GitHub PR 链接、完成报告的 artifacts → 卡片链接。
+- 如果 relay 任务带 `source_thread`，它会挂在那个对话的卡片下面；对话卡用任务标题命名，不显示原始 thread id。
 
-从文字里推断只是兜底。想让 Grok Bot 内部的每一步（转交、二审、部署、它启动的 Cursor agent）都有自己的卡片和状态，让 Grok Bot 按 [`examples/grok-bot-reporting.md`](examples/grok-bot-reporting.md) 直接上报，`parent` 填 `grok-bot:<relay_task_id>`。
+Grok Bot 不需要额外往看板上报，也不需要 MCP：看板只读 relay。Grok 只要在 relay 进展里用对状态词，见 [`examples/grok-bot-reporting.md`](examples/grok-bot-reporting.md)。
 
 ### 聊天类 agent（MCP）
 
@@ -252,7 +256,7 @@ curl -X POST http://127.0.0.1:7311/api/events -H 'content-type: application/json
 
 - Codex 的 `notify` 只报告“一轮结束”；要看 Running 用 `akb run -- codex`。
 - 聊天平台不会自己汇报，除非它们连上了 MCP 工具并且被要求使用；纯网页聊天没有可以挂钩的地方。
-- 从 Grok relay progress 文本里识别转交和 Cursor agent 是启发式的；要准确的内部活动，让 Grok Bot 直接上报。relay 每个任务只保留最近 20 条 progress。
+- 从 Grok relay progress 文本里识别转交、等待对象和 Cursor agent 是启发式的，卡上「等…」标记写明是推断。relay 每个任务只保留最近 20 条 progress。
 - 状态存在单个 JSON 文件里，适合个人使用；同一个数据目录只运行一个 `akb serve`。
 
 ## 开发
