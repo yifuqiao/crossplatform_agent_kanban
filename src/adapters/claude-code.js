@@ -7,6 +7,8 @@ const RESOLVE_TOOL = /(^|__)set_thread_resolved$/;
 const RENAME_TOOL = /(^|__)(rename_thread|set_session_title)$/;
 const PR_TOOL = /(^|__)create_pull_request$/;
 const CHECKLIST_TOOL = /(^|__)update_progress_checklist$/;
+const DELIVER_TOOL = /(^|__)post_message$/;
+const DECISION_TOOL = /(^|__)request_decision$/;
 const PR_URL = /https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+/;
 
 // Maps one Claude Code hook payload (stdin JSON) to board events.
@@ -40,7 +42,8 @@ export function claudeCodeEvents(payload, env = process.env) {
     case "UserPromptSubmit": {
       // The person's own words name the card; a coordinator's note only until those arrive.
       const { text, human } = promptParts(payload.prompt);
-      events.push({ ...base, status: "running", title: oneLine(text, 100) || undefined, title_mode: human ? "first" : "default", ...promptLine(text || payload.prompt, human) });
+      // A new turn: whatever the last one handed over has been seen (new_turn clears the 等您 mark).
+      events.push({ ...base, status: "running", new_turn: true, title: oneLine(text, 100) || undefined, title_mode: human ? "first" : "default", ...promptLine(text || payload.prompt, human) });
       break;
     }
     case "PreToolUse":
@@ -91,6 +94,17 @@ export function claudeCodeEvents(payload, env = process.env) {
       } else if (RENAME_TOOL.test(payload.tool_name || "") && payload.tool_input?.title) {
         // The thread's own title says what the work is better than any prompt.
         events.push({ ...base, title: oneLine(payload.tool_input.title, 100), title_mode: "replace" });
+      } else if (DECISION_TOOL.test(payload.tool_name || "")) {
+        // A decision card is the person's to answer: the turn's end moves the card to 等您.
+        const question = oneLine(payload.tool_input?.question, 200);
+        events.push({ ...base, awaiting_person: true, message: question ? `等你选：${question}` : "等你做个选择", type: "decision" });
+      } else if (DELIVER_TOOL.test(payload.tool_name || "")) {
+        // A reply that hands over a result (a doc, a page, a file link) waits on the person's verdict:
+        // its links go on the card and the turn's end moves the card to 等您. A PR alone goes to 审核中 instead.
+        const outputs = deliveredOutputs(payload.tool_input);
+        if (outputs.length) {
+          events.push({ ...base, awaiting_person: true, links: outputs, message: `交付了产出：${outputs.map((o) => o.label).join("、")}`, type: "output" });
+        }
       } else {
         // An opened pull request is what 审核中 means: work waiting on the person's review.
         const url = openedPr(payload);
@@ -107,7 +121,8 @@ export function claudeCodeEvents(payload, env = process.env) {
       break;
     case "Stop":
       // A finished turn is not finished work: the card stays where it is (进行中, marked idle).
-      // Only an opened PR, a resolved thread or the end of the session moves it on.
+      // Only a delivered result or a decision (等您), an opened PR (审核中), a resolved thread or the
+      // end of the session moves it on.
       events.push({ ...base, idle: true, message: "这一轮做完了，等你下一句", type: "stop" });
       break;
     case "SessionEnd":
@@ -132,6 +147,25 @@ function openedPr(payload) {
   const res = payload.tool_response;
   const text = typeof res === "string" ? res : responseText(res) || (res && typeof res === "object" ? JSON.stringify(res) : "");
   return PR_URL.exec(text)?.[0] || null;
+}
+
+// The results a post_message hands over: its attached links and Artifacts, and the links in its text
+// (markdown [label](url) or bare). Pull request links are left to the PR rule; project files have no URL.
+const MD_LINK = /\[([^\]\n]{1,80})\]\((https:\/\/[^\s)]+)\)/g;
+const BARE_URL = /https:\/\/[^\s)<>"'\]]+/g;
+export function deliveredOutputs(input) {
+  const out = [];
+  const add = (url, label) => {
+    if (!/^https:\/\//.test(url || "") || PR_URL.test(url) || out.some((o) => o.url === url)) return;
+    out.push({ url, label: oneLine(label, 60) || "产出", output: true });
+  };
+  for (const o of Array.isArray(input?.attached_outputs) ? input.attached_outputs : []) {
+    if (o?.kind === "link" || o?.kind === "frame") add(o.ref, o.title);
+  }
+  const text = typeof input?.text === "string" ? input.text : "";
+  for (const m of text.matchAll(MD_LINK)) add(m[2], m[1]);
+  for (const m of text.replace(MD_LINK, "").matchAll(BARE_URL)) add(m[0].replace(/[.,;:!?，。]+$/, ""), "");
+  return out.slice(0, 5);
 }
 
 // update_progress_checklist text ("header\n\n✓ step\n✱ step\n○ step") or TodoWrite todos → [{ text, state }].

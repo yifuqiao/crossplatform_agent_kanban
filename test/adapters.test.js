@@ -218,3 +218,54 @@ test("a new Claude Code session starts in Queued, and a mid-task SessionStart do
   ]);
   assert.equal(s.get("claude-code:q1").status, "running");
 });
+
+test("a turn that hands over a result or a decision ends in 等您 with the result linked on the card", () => {
+  const s = new Store();
+  const base = { session_id: "o1" };
+  const key = "claude-code:o1";
+  feed(s, claudeCodeEvents, [
+    { ...base, hook_event_name: "UserPromptSubmit", prompt: "evaluate the plan" },
+    { ...base, hook_event_name: "PostToolUse", tool_name: "mcp__hearthbot__post_message", tool_input: {
+      text: "评估写好了：[可行性评估](https://claude.ai/code/artifact/abc)。PR 在 https://github.com/o/r/pull/3",
+      attached_outputs: [{ kind: "frame", ref: "https://claude.ai/code/artifact/abc" }, { kind: "file", ref: "/mnt/project-files/x.md" }, { kind: "link", ref: "https://example.com/d", title: "Design" }],
+    } },
+    // Later tool calls in the same turn keep the card in 进行中 until the turn ends.
+    { ...base, hook_event_name: "PreToolUse", tool_name: "mcp__hearthbot__update_progress_checklist", tool_input: {} },
+  ]);
+  assert.equal(s.get(key).status, "running");
+  assert.deepEqual(s.get(key).links, [
+    { url: "https://claude.ai/code/artifact/abc", label: "产出", output: true },
+    { url: "https://example.com/d", label: "Design", output: true },
+  ]);
+  feed(s, claudeCodeEvents, [{ ...base, hook_event_name: "Stop" }]);
+  assert.equal(s.get(key).status, "waiting");
+  // The person answers: back to 进行中, and a plain turn end after that stays there.
+  feed(s, claudeCodeEvents, [
+    { ...base, hook_event_name: "UserPromptSubmit", prompt: "looks good, go" },
+    { ...base, hook_event_name: "PostToolUse", tool_name: "mcp__hearthbot__post_message", tool_input: { text: "开工了" } },
+  ]);
+  assert.equal(s.get(key).status, "running");
+  feed(s, claudeCodeEvents, [{ ...base, hook_event_name: "Stop" }]);
+  assert.equal(s.get(key).status, "running");
+
+  // A decision card waits on the person too.
+  feed(s, claudeCodeEvents, [
+    { ...base, hook_event_name: "UserPromptSubmit", prompt: "next" },
+    { ...base, hook_event_name: "PostToolUse", tool_name: "mcp__hearthbot__request_decision", tool_input: { question: "先做哪一期？" } },
+    { ...base, hook_event_name: "Stop" },
+  ]);
+  assert.equal(s.get(key).status, "waiting");
+  assert.match(s.get(key).events.findLast((e) => e.type === "decision").message, /先做哪一期/);
+});
+
+test("a reply that only links a PR leaves the card to the PR rule", () => {
+  const s = new Store();
+  const base = { session_id: "o2" };
+  feed(s, claudeCodeEvents, [
+    { ...base, hook_event_name: "UserPromptSubmit", prompt: "fix" },
+    { ...base, hook_event_name: "PostToolUse", tool_name: "mcp__github__create_pull_request", tool_input: {}, tool_response: "https://github.com/o/r/pull/9" },
+    { ...base, hook_event_name: "PostToolUse", tool_name: "mcp__hearthbot__post_message", tool_input: { text: "PR 在 https://github.com/o/r/pull/9" } },
+    { ...base, hook_event_name: "Stop" },
+  ]);
+  assert.equal(s.get("claude-code:o2").status, "review");
+});

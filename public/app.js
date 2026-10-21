@@ -221,6 +221,7 @@ function card(t, { showParent = false, hideTree = false } = {}) {
     silent && el("span", { class: "flag silent", title: "还标着进行中，但之后再没有任何上报。agent 可能已经停了却没说。" }, silent),
     idle && el("span", { class: "flag idle", title: "这一轮做完了，在等你的下一句话。开了 PR 才进审核中。" }, `空闲 ${ago(t.idleSince)}`),
     attention && el("span", { class: "flag" }, "子任务等您"),
+    t.status === "waiting" && t.awaitingPerson && el("span", { class: "flag", title: "agent 这一轮交了产出或提了选择，等你看完回话" }, "产出待你看"),
     t.meta?.waiting_on && el("span", { class: "flag", title: "从 agent 最近的进展里推断" }, `等${t.meta.waiting_on}`),
     selfReported(t) && el("span", { class: "flag self", title: "只在 agent 通过 MCP 主动上报时更新，不走 hook 或轮询" }, "自报"),
     t.updateRequest && el("span", { class: "flag asked", title: "等 agent 写一段进展" }, "已请求更新"),
@@ -236,10 +237,19 @@ function card(t, { showParent = false, hideTree = false } = {}) {
     t.summary && el("div", { class: "summary" }, t.summary),
     last && !t.checklist?.length && !(t.summary && same(last, t.summary)) && !same(last, displayTitle(t)) && el("div", { class: "last", title: last }, last),
     flags.length > 0 && el("div", { class: "flags" }, flags),
+    outputLinks(t),
     checklistBlock(t),
     choiceBlock(t, { compact: true }),
     desc.length > 0 && !hideTree && el("div", { class: "rollup" }, Object.entries(counts).map(([st, n]) => el("span", { class: "pill", style: `--c:var(--${st})` }, `${n} ${STATUS_LABEL[st]}`))),
     showTree && tree(t.key));
+}
+
+// The results the agent handed over (docs, pages, PRs), clickable right on the card face.
+function outputLinks(t) {
+  const links = (t.links || []).filter((l) => l.output || l.label === "PR").slice(-3);
+  if (!links.length) return null;
+  return el("div", { class: "outputs" }, links.map((l) =>
+    el("a", { href: l.url, target: "_blank", rel: "noopener noreferrer", title: l.url, onclick: (e) => e.stopPropagation() }, l.label || l.url)));
 }
 
 function renderSources() {
