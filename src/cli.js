@@ -107,7 +107,7 @@ async function cmdHook(f) {
     const out = applyEnvLinks(events, rootKey).map((ev) => ({ at, ...ev }));
     // Codex on Windows ends a hook's child processes when the hook exits, so a detached send never
     // happens there: send inline, well inside Codex's hook timeout. AKB_HOOK_SYNC=1 forces this anywhere.
-    if (events.length && syncHook(which)) await post("/api/events", out, 3500).catch(() => {});
+    if (events.length && syncHook(which)) await sendAndWait(out, 3500);
     else if (events.length) sendInBackground(out);
   } catch (err) {
     if (process.env.AKB_DEBUG) console.error(`[akb] hook ${which}: ${err.message}`);
@@ -119,21 +119,56 @@ function syncHook(which) {
   return process.env.AKB_HOOK_SYNC === "1" || (which === "codex" && process.platform === "win32");
 }
 
+// Send before the hook exits. Node's global fetch ignores HTTPS_PROXY unless started with
+// NODE_USE_ENV_PROXY, so behind a proxy the send runs in a child started with it, and is waited for.
+async function sendAndWait(events, timeoutMs) {
+  const env = senderEnv();
+  if (env.NODE_USE_ENV_PROXY === process.env.NODE_USE_ENV_PROXY) {
+    await post("/api/events", events, timeoutMs).catch(() => {});
+    return;
+  }
+  const child = spawnSender(env, false);
+  await new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      child.kill();
+      resolve();
+    }, timeoutMs);
+    child.on("exit", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+    child.on("error", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+    child.stdin.end(JSON.stringify(events));
+  });
+}
+
 // Hand the events to a detached `akb send` so the agent never waits on the network
 // (a remote board can be seconds away).
 function sendInBackground(events) {
+  const child = spawnSender(senderEnv(), true);
+  child.on("error", () => {});
+  child.stdin.end(JSON.stringify(events));
+  child.unref();
+}
+
+function senderEnv() {
   const env = { ...process.env };
   // Node's fetch ignores HTTPS_PROXY unless told to; cloud sandboxes route egress through one.
   if ((env.HTTPS_PROXY || env.https_proxy) && !env.NODE_USE_ENV_PROXY) env.NODE_USE_ENV_PROXY = "1";
+  return env;
+}
+
+function spawnSender(env, detached) {
   const child = spawn(process.execPath, ["--no-warnings", fileURLToPath(import.meta.url), "send"], {
-    detached: true,
+    detached,
     env,
     stdio: ["pipe", "ignore", env.AKB_DEBUG ? "inherit" : "ignore"],
   });
-  child.on("error", () => {});
   child.stdin.on("error", () => {});
-  child.stdin.end(JSON.stringify(events));
-  child.unref();
+  return child;
 }
 
 async function cmdSend() {
