@@ -108,7 +108,7 @@ export class Store extends EventEmitter {
     if (this.file) {
       this.load();
       this.migrate();
-      this.groupUntitled();
+      this.dropEmptyCodexSessions();
       this.tidy();
     }
   }
@@ -186,6 +186,8 @@ export class Store extends EventEmitter {
     const rawStatus = input.status ?? (isNew || this.tasks.get(key).placeholder ? input.initial_status : undefined);
     let status = normalizeStatus(rawStatus);
     if (rawStatus != null && !status) throw new Error(`unknown status: ${rawStatus}`);
+    // only_if_exists: this event may update a card but must not open one (e.g. a session that never got a prompt).
+    if (input.only_if_exists === true && (isNew || this.tasks.get(key).placeholder)) return { task: null, key, skipped: true, changed: false };
     const task = this.ensure(cleanString(ref.source, 60), cleanString(ref.externalId, 200), now);
     // awaiting_review: the agent opened a PR. awaiting_person: this turn handed the person a result or a
     // decision; new_turn (the person's next prompt) clears it. idle: the turn is over and the agent waits
@@ -290,23 +292,6 @@ export class Store extends EventEmitter {
 
     const parent = parseRef(input.parent);
     let oldParentKey = null;
-    // group: a card with no title of its own yet (e.g. a session that only started and ended) hangs under a
-    // summary card instead of taking a top-level slot; its first real title moves it back out.
-    const group = parseRef(input.group);
-    if (group && !parent && !task.titled && !task.parentKey && !task.placeholder) {
-      const groupTask = this.ensure(group.source, group.externalId, now);
-      const groupTitle = cleanString(input.group_title, 100);
-      if (groupTitle && groupTask.title === groupTask.externalId) groupTask.title = groupTitle;
-      if (groupTask.key !== task.key) {
-        task.parentKey = groupTask.key;
-        task.autoGroup = true;
-        changed.push(groupTask);
-      }
-    } else if (task.autoGroup && task.titled && task.parentKey && !parent) {
-      oldParentKey = task.parentKey;
-      task.parentKey = null;
-      task.autoGroup = false;
-    }
     if (parent) {
       const parentTask = this.ensure(parent.source, parent.externalId, now);
       if (parentTask.key !== task.key && !this.wouldCycle(task.key, parentTask.key)) {
@@ -512,23 +497,24 @@ export class Store extends EventEmitter {
     if (dirty) this.scheduleSave();
   }
 
-  // Codex cards that never got a prompt (only "Session ended") used to each take a top-level slot.
-  groupUntitled() {
-    const now = new Date().toISOString();
+  // Codex Desktop opens empty threads ahead of time; older versions gave each a card of its own (and a
+  // short-lived summary card). A card with no prompt, no children and only start/stop lines has no content.
+  dropEmptyCodexSessions() {
     let dirty = false;
     for (const t of [...this.tasks.values()]) {
-      if (!t.source.startsWith("codex") || t.titled || t.placeholder || t.parentKey) continue;
-      if (t.events?.some((e) => e.type === "prompt")) continue;
-      const g = this.ensure(t.source, "_idle", now);
-      if (g.title === g.externalId) g.title = "Codex 无内容会话";
-      t.parentKey = g.key;
-      t.autoGroup = true;
+      if (!t.source.startsWith("codex") || t.placeholder || t.titled || (t.parentKey && !t.autoGroup)) continue;
+      if (!t.events?.length || t.events.some((e) => !["session", "stop"].includes(e.type))) continue;
+      if (this.children(t.key).length) continue;
+      this.tasks.delete(t.key);
       dirty = true;
     }
-    if (dirty) {
-      for (const t of this.tasks.values()) if (t.placeholder) this.rollup(t.key);
-      this.scheduleSave();
+    for (const t of [...this.tasks.values()]) {
+      if (t.key.endsWith(":_idle") && t.source.startsWith("codex") && !this.children(t.key).length) {
+        this.tasks.delete(t.key);
+        dirty = true;
+      }
     }
+    if (dirty) this.scheduleSave();
   }
 
   // Fix up stale placeholder status in state saved by older versions. Deletes nothing at startup:
