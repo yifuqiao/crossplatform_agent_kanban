@@ -52,16 +52,28 @@ function ago(iso) {
 const since = (iso) => (Date.now() - Date.parse(iso) < 60000 ? "刚刚" : `${ago(iso)}前`);
 
 const ENTITIES = { lt: "<", gt: ">", amp: "&", quot: '"', "#39": "'", apos: "'" };
-// Older cloud-session cards were titled with the raw <wake>/<coordinator-relay> XML of the first
-// prompt. Show the person's own words instead (same rules as promptText in src/adapters/common.js).
+const ENVELOPE = /^\s*(<|&lt;)(wake|coordinator-relay|relay|system-reminder|session-context)\b/i;
+const ATTACHMENTS = /^(\s*@(?:"[^"]*"|\S+))+\s*/;
+// The person's words in a (possibly cut-off) prompt envelope; same rules as promptParts in src/adapters/common.js.
+function envelopeWords(raw) {
+  const body = raw.replace(ATTACHMENTS, "");
+  if (!ENVELOPE.test(body)) return body.trim();
+  const s = body.replace(/&(lt|gt|amp|quot|#39|apos);/g, (_, e) => ENTITIES[e])
+    .replace(/<(system-reminder|system-note|session-context|untrusted-uploads)\b[^>]*>[\s\S]*?<\/\1\b[^>]*>/gi, " ");
+  const m = /<cited\b[^>]*author="user"[^>]*>([^<]+)/i.exec(s) || /<message\b[^>]*from="human"[^>]*>([^<]+)/i.exec(s) || /<note>([^<]+)/i.exec(s);
+  return m ? m[1].replace(/\s+/g, " ").trim() : "";
+}
+// Older cloud-session cards were titled with the raw <wake>/<session-context> XML of the first prompt,
+// cut off before the person's words. Show those words, from the title or a later prompt on the timeline.
 function displayTitle(t) {
   const raw = t.title || "";
-  if (!/^\s*(<|&lt;)(wake|coordinator-relay|system-reminder)\b/i.test(raw)) return raw;
-  const s = raw.replace(/&(lt|gt|amp|quot|#39|apos);/g, (_, e) => ENTITIES[e])
-    .replace(/<(system-reminder|system-note|session-context)\b[^>]*>[\s\S]*?<\/\1\b[^>]*>/gi, " ");
-  const m = /<cited\b[^>]*author="user"[^>]*>([^<]+)/i.exec(s) || /<message\b[^>]*from="human"[^>]*>([^<]+)/i.exec(s) || /<note>([^<]+)/i.exec(s);
-  const text = (m ? m[1] : s.replace(/<[^>]*>?/g, " ")).replace(/\s+/g, " ").trim();
-  return text || `${t.source} · ${t.cwd ? t.cwd.split("/").pop() : t.externalId}`;
+  if (raw.trim() && !ENVELOPE.test(raw.replace(ATTACHMENTS, ""))) return raw;
+  const prompts = (t.events || []).filter((e) => e.type === "prompt" && e.message).map((e) => e.message.replace(/^Prompt: /, ""));
+  for (const p of [raw, ...prompts]) {
+    const w = envelopeWords(p);
+    if (w) return w.length > 100 ? `${w.slice(0, 99)}…` : w;
+  }
+  return `${t.source} · ${t.cwd ? t.cwd.split("/").pop() : t.externalId}`;
 }
 
 const childrenOf = (key) => [...state.tasks.values()].filter((t) => t.parentKey === key).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
@@ -93,6 +105,7 @@ function lastHeard(t) {
 // Says "in progress" but nothing has reported for a while: the agent may have stopped without saying so.
 function silentReason(t) {
   if (t.status !== "planning" && t.status !== "running") return null;
+  if (t.idleSince) return null;
   const last = lastHeard(t);
   const grok = t.source === "grok-bot";
   if (Date.now() - Date.parse(last) <= (grok ? GROK_SILENT_MS : SILENT_MS)) return null;
@@ -152,6 +165,13 @@ async function pickChoice(t, value, btn) {
   }
 }
 
+// The agent's own steps, checked off as it reports them.
+const CHECK_MARK = { done: "✓", doing: "▸", todo: "○" };
+function checklistBlock(t) {
+  if (!t.checklist?.length) return null;
+  return el("ul", { class: "checklist" }, t.checklist.map((c) => el("li", { class: c.state }, el("span", { class: "mark" }, CHECK_MARK[c.state]), c.text)));
+}
+
 function choiceBlock(t, { compact = false } = {}) {
   const hasPrompt = t.question || t.background || (t.options && t.options.length);
   if (!hasPrompt && !t.choice) return null;
@@ -177,15 +197,17 @@ function card(t, { showParent = false, hideTree = false } = {}) {
   const counts = {};
   for (const d of desc) counts[d.status] = (counts[d.status] || 0) + 1;
   const attention = t.status !== "waiting" && desc.some((d) => d.status === "waiting");
-  const last = t.events?.findLast((e) => e.type !== "update_request" && e.type !== "choice" && e.type !== "choice_clear")?.message;
+  const last = t.events?.findLast((e) => e.type !== "update_request" && e.type !== "choice" && e.type !== "choice_clear" && e.type !== "checklist")?.message;
   const same = (a, b) => a.slice(0, 60) === b.slice(0, 60);
   const parent = (showParent || state.flat) && t.parentKey ? state.tasks.get(t.parentKey) : null;
   const stale = staleReason(t);
   const silent = !stale && silentReason(t);
+  const idle = !stale && t.status === "running" && t.idleSince;
   const heard = lastHeard(t);
   const flags = [
     stale && el("span", { class: "flag" }, stale),
     silent && el("span", { class: "flag silent", title: "还标着进行中，但之后再没有任何上报。agent 可能已经停了却没说。" }, silent),
+    idle && el("span", { class: "flag idle", title: "这一轮做完了，在等你的下一句话。开了 PR 才进审核中。" }, `空闲 ${ago(t.idleSince)}`),
     attention && el("span", { class: "flag" }, "子任务等您"),
     t.meta?.waiting_on && el("span", { class: "flag", title: "从 agent 最近的进展里推断" }, `等${t.meta.waiting_on}`),
     selfReported(t) && el("span", { class: "flag self", title: "只在 agent 通过 MCP 主动上报时更新，不走 hook 或轮询" }, "自报"),
@@ -200,8 +222,9 @@ function card(t, { showParent = false, hideTree = false } = {}) {
     parent && el("div", { class: "parent-line" }, `↳ ${displayTitle(parent)}`),
     el("div", { class: "title" }, displayTitle(t)),
     t.summary && el("div", { class: "summary" }, t.summary),
-    last && !(t.summary && same(last, t.summary)) && el("div", { class: "last", title: last }, last),
+    last && !t.checklist?.length && !(t.summary && same(last, t.summary)) && el("div", { class: "last", title: last }, last),
     flags.length > 0 && el("div", { class: "flags" }, flags),
+    checklistBlock(t),
     choiceBlock(t, { compact: true }),
     desc.length > 0 && !hideTree && el("div", { class: "rollup" }, Object.entries(counts).map(([st, n]) => el("span", { class: "pill", style: `--c:var(--${st})` }, `${n} ${STATUS_LABEL[st]}`))),
     showTree && tree(t.key));
@@ -318,6 +341,7 @@ function renderDetail() {
     el("h3", { title: title !== t.title ? t.title : null }, title),
     parent && el("div", { class: "parent-line" }, "属于 ", el("a", { href: "#", onclick: (e) => { e.preventDefault(); openTask(parent.key); } }, displayTitle(parent))),
     t.summary && el("p", {}, t.summary),
+    checklistBlock(t),
     choiceBlock(t),
     links.length > 0 && el("div", { class: "links" }, links.map((l) => el("a", { href: l.url, target: "_blank", rel: "noopener noreferrer" }, l.label || l.url))),
     el("div", { class: "meta" }, meta.flatMap(([k, v]) => [el("span", {}, k), el("span", {}, v)])),
