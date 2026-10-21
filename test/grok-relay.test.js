@@ -151,7 +151,8 @@ async function restartAndPoll(relayTasks) {
     const body = id ? relayTasks.find((t) => t.relayTaskId === id) : { tasks: relayTasks.map(({ updates, ...t }) => t) };
     return { ok: true, status: 200, json: async () => body };
   };
-  await createGrokRelayPoller({ store: s, baseUrl: "https://relay.example.com", keys: ["k1"], fetchImpl }).poll();
+  // Poll as of the fixture's time, so the 24-hour quiet rule does not touch its cards.
+  await createGrokRelayPoller({ store: s, baseUrl: "https://relay.example.com", keys: ["k1"], fetchImpl, now: () => Date.parse("2026-10-20T08:01:00.000Z") }).poll();
   return { s, before };
 }
 
@@ -319,4 +320,17 @@ test("a conversation card is named after its task, not its raw thread id", () =>
   s.apply({ key: "claude-code-web:session_01BPER2M4UidTDfYdHw8ji51", title: "Grok Bot 状态上报设计", status: "running" });
   for (const ev of grokTaskEvents({ ...detail, sourceThread: "session_01BPER2M4UidTDfYdHw8ji51" }, { listed, existing: () => null })) s.apply(ev);
   assert.equal(s.get("claude-code-web:session_01BPER2M4UidTDfYdHw8ji51").title, "Grok Bot 状态上报设计");
+});
+
+test("an open relay task that fell off the first /tasks page still goes quiet; other grok-bot cards do not", async () => {
+  const s = new Store();
+  s.apply({ key: "grok-bot:old-relay", title: "Old", status: "executing", meta: { relay_status: "executing" }, at: at(0) });
+  s.apply({ key: "grok-bot:from-mcp", title: "Reported over MCP", status: "running", at: at(0) });
+  const fetchImpl = async () => ({ ok: true, status: 200, json: async () => ({ tasks: [] }) });
+  const poller = createGrokRelayPoller({ store: s, baseUrl: "https://relay.example.com", keys: ["k1"], fetchImpl, now: () => Date.parse(at(0)) + 25 * 3600 * 1000 });
+  await poller.poll();
+  await poller.poll();
+  assert.equal(s.get("grok-bot:old-relay").status, "waiting");
+  assert.equal(s.get("grok-bot:old-relay").events.filter((e) => e.type === "quiet").length, 1);
+  assert.equal(s.get("grok-bot:from-mcp").status, "running");
 });

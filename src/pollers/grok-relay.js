@@ -236,6 +236,7 @@ export function createGrokRelayPoller({ store, baseUrl, keys, limit = 50, closeC
   }
 
   async function poll() {
+    const listedIds = new Set();
     for (const key of keys) {
       const list = await getJson(`/tasks?limit=${limit}`, key);
       // Dry runs (e.g. relay-ping) never reach an executor; keep them off the board.
@@ -252,6 +253,13 @@ export function createGrokRelayPoller({ store, baseUrl, keys, limit = 50, closeC
         const ev = quietEvent(listed, now());
         if (ev && store.get(ev.key)) store.apply(ev);
       }
+      for (const t of tasks) listedIds.add(t.relayTaskId);
+    }
+    // Open relay tasks that fell off the first page of /tasks still go quiet; judge them by the card's last update.
+    for (const card of store.list({ source: SOURCE })) {
+      if (!card.meta?.relay_status || card.meta.superseded_by || listedIds.has(card.externalId)) continue;
+      const ev = quietEvent({ relayTaskId: card.externalId, status: card.status, updatedAt: card.updatedAt }, now());
+      if (ev) store.apply(ev);
     }
   }
 
