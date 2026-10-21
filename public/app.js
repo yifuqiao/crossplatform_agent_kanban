@@ -529,6 +529,11 @@ function landingSpot(key) {
 }
 
 function render() {
+  // A direct render that lands while the window is away (e.g. a choice POST resolving) waits for focus too.
+  if (seen.size && away()) {
+    pending = true;
+    return;
+  }
   const before = cardRects();
   const was = seen;
   const first = was.size === 0;
